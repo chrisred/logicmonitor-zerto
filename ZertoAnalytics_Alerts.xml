@@ -1,0 +1,293 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<feed  version="1.0" hasPendingRequests="false" >
+  <company></company>
+  <status>200</status>
+  <errmsg>OK</errmsg>
+  <interval>0</interval>
+    <entry type="preeventsource">
+        <version>1690231832</version>
+        <name>Zerto Analytics Alerts</name>
+        <description>Zerto Analytics alerts at Error severity.</description>
+        <group></group>
+        <alertlevel>2</alertlevel>
+        <appliesto>hasCategory(&#34;ZertoAnalytics&#34;)</appliesto>
+        <collector>scriptevent</collector>
+        <alertsubjecttemplate></alertsubjecttemplate>
+        <alertbodytemplate>Host: ##HOST##
+Detected: ##START##
+Zerto Alert ID:  ##ZERTO.ALERTTYPE##
+Zerto Entity: ##ZERTO.ENTITYTYPE##
+Zerto Site: ##ZERTO.SITENAME##
+Message: ##MESSAGE##</alertbodytemplate>
+        <alerteffectiveival>60</alerteffectiveival>
+        <clearafterack>false</clearafterack>
+        <suppressduplicates>true</suppressduplicates>
+        <suppressduplicateses>true</suppressduplicateses>
+        <tags></tags>
+        <technology>Device Properties:
+
+zertoanalytics.alertlimit -- Optional, defaults to 250 when not set. This sets the maximum number of alerts the API returns each time the EventSource is run.
+zertoanalytics.host -- Optional, defaults to the device IP when not set.
+zertoanalytics.user -- The Zerto Analytics user name.
+zertoanalytics.pass -- The Zerto Analytics password.
+system.categories -- Add &#34;ZertoAnalytics&#34;.
+
+Notes:
+
+Details of the API should be available at https://docs.api.zerto.com. The current host address is https://analytics.api.zerto.com.</technology>
+        <doMapping>true</doMapping>
+        <schemaVersion>3</schemaVersion>
+        <params>
+        <preeventsourceparam>
+            <name>scripttype</name>
+            <value>embed</value>
+            <comment>embed</comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>scriptgroovy</name>
+            <value>import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.time.format.DateTimeFormatter
+import java.time.ZonedDateTime
+import java.time.ZoneId
+import org.apache.http.client.utils.URIBuilder
+
+// core http classes
+import org.apache.http.auth.AuthScope
+import org.apache.http.auth.Credentials
+import org.apache.http.auth.NTCredentials
+import org.apache.http.client.config.*
+import org.apache.http.client.entity.*
+import org.apache.http.client.methods.*
+import org.apache.http.client.ServiceUnavailableRetryStrategy
+import org.apache.http.conn.ssl.NoopHostnameVerifier
+import org.apache.http.conn.ssl.TrustSelfSignedStrategy
+import org.apache.http.entity.*
+import org.apache.http.Header
+import org.apache.http.HttpResponse
+import org.apache.http.impl.client.BasicCredentialsProvider
+import org.apache.http.impl.client.CloseableHttpClient
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.impl.client.HttpClientBuilder
+import org.apache.http.impl.client.StandardHttpRequestRetryHandler
+import org.apache.http.ssl.SSLContextBuilder
+import org.apache.http.util.EntityUtils
+
+// LM properties
+def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
+def propHost = hostProps.get(&#39;zertoanalytics.host&#39;) ?: propSystemHost
+def propUser = hostProps.get(&#39;zertoanalytics.user&#39;)
+def propPass = hostProps.get(&#39;zertoanalytics.pass&#39;)
+def propAlertLimit = hostProps.get(&#39;zertoanalytics.alertlimit&#39;)?.isInteger() ?
+    hostProps.get(&#39;zertoanalytics.alertlimit&#39;) : &#39;250&#39;
+
+def dateFormat = DateTimeFormatter.ofPattern(&#34;yyyy-MM-dd&#39;T&#39;HH:mm:ss.SSSX&#34;)
+def utcNow = ZonedDateTime.now(ZoneId.of(&#39;UTC&#39;))
+
+Map severity = [
+    &#39;Warning&#39;: &#39;warn&#39;,
+    &#39;Error&#39;: &#39;error&#39;
+]
+
+try
+{
+    def sessionToken = getSessionToken(propHost, propUser, propPass)
+
+    if (sessionToken == &#39;&#39;)
+    {
+        println &#39;Error: Invalid session token).&#39;
+        return 2
+    }
+
+    // GET request
+    def mainUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setHost(propHost)
+        .setPath(&#39;/v2/monitoring/alerts&#39;)
+        .setParameter(&#39;limitTo&#39;, propAlertLimit)
+
+    def mainHttpGet = new HttpGet(mainUriBuilder.build())
+    mainHttpGet.setHeader(&#39;Authorization&#39;, &#34;Bearer ${sessionToken}&#34;)
+
+    def mainResponse = runRequest(mainHttpGet)
+
+    if (mainResponse.code != 200)
+    {
+        println &#34;Error: Bad response code (${mainResponse.code}).&#34;
+        return 3
+    }
+
+    def jsonSlurper = new JsonSlurper()
+    def alerts = jsonSlurper.parseText(mainResponse.body)
+
+    def filteredAlerts = alerts.findAll { alert -&#62;
+        utcNow.minusMinutes(10).isBefore(ZonedDateTime.parse(alert[&#39;collectionTime&#39;], dateFormat))
+    }
+
+    def events = [&#39;events&#39;: []]
+    filteredAlerts.each { alert -&#62;
+        events.events &#60;&#60; [
+            &#39;happenedOn&#39;: alert.collectionTime,
+            &#39;severity&#39;: severity.getOrDefault(alert.severity, &#39;warn&#39;),
+            &#39;message&#39;: alert.description,
+            &#39;source&#39;: &#39;ZertoAnalyticsAlerts&#39;,
+            &#39;zerto.entityType&#39;: alert.entityType,
+            &#39;zerto.alertType&#39;: alert.type,
+            &#39;zerto.siteName&#39;: alert?.site?.name
+        ]
+    }
+
+    println JsonOutput.toJson(events)
+
+    return 0
+}
+catch (Exception e)
+{
+    println e
+    return 1
+}
+
+String getSessionToken(String host, String user, String pass)
+{
+    def sessionToken = &#39;&#39;
+
+    def postUriBuilder = new URIBuilder().setScheme(&#39;https&#39;).setHost(host).setPath(&#39;/v2/auth/token&#39;)
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/json&#39;)
+
+    def postData = &#34;&#34;&#34;{&#34;username&#34;: &#34;${user}&#34;,&#34;password&#34;: &#34;${pass}&#34;}&#34;&#34;&#34;
+    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        def jsonSlurper = new JsonSlurper()
+        def jsonResponse = jsonSlurper.parseText(postResponse.body)
+        sessionToken = jsonResponse.token
+    }
+
+    return sessionToken
+}
+
+Map runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)
+{
+    if (request instanceof HttpGet != true)
+    {
+        request.setEntity(entity)
+    }
+
+    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion
+    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient
+    def waitPeriod = 0L
+    def serviceRetry = [
+        retryRequest: { response, executionCount, context -&#62;
+            // increase the wait for each try, here we would wait 3, 6 and 9 seconds
+            waitPeriod += 3000L
+            def statusCode = response.getStatusLine().getStatusCode()
+            return executionCount &#60;= 3 &#38;&#38; (statusCode == 429 || statusCode == 500 || statusCode == 503)
+        },
+        getRetryInterval: {
+            return waitPeriod
+        }
+    ] as ServiceUnavailableRetryStrategy
+
+    // create an http client which retries for connection &#34;I/O&#34; errors and for certain http status codes
+    HttpClientBuilder httpClientBuilder = HttpClients.custom()
+        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())
+        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))
+        .setServiceUnavailableRetryStrategy(serviceRetry)
+
+    // allow self-signed certificates
+    httpClientBuilder.setSSLContext(
+        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()
+    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+
+    if (credentials)
+    {
+        // attempt authentication with credentials supported by the BasicCredentialsProvider
+        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()
+        credentialProvider.setCredentials(AuthScope.ANY, credentials)
+        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)
+    }
+
+    CloseableHttpClient httpClient = httpClientBuilder.build()
+    HttpResponse response = httpClient.execute(request)
+    String responseBody = null
+
+    if (response.getEntity())
+    {
+        // only attempt to convert the body to string if there is content
+        responseBody = EntityUtils.toString(response.getEntity())
+    }
+
+    Integer code = response.getStatusLine().getStatusCode()
+    List&#60;Header&#62; headers = response.getAllHeaders()
+
+    def responseMap = [
+        code: code,
+        headers: headers,
+        body: responseBody,
+    ]
+
+    httpClient.close()
+    return responseMap
+}</value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>windowsscript</name>
+            <value></value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>linuxscript</name>
+            <value></value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>windowscmdline</name>
+            <value></value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>linuxcmdline</name>
+            <value></value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>schedule</name>
+            <value>600</value>
+            <comment>180</comment>
+        </preeventsourceparam>
+        </params>
+        <filters>
+        <preeventsourcefilter>
+            <name>zerto.alertType</name>
+            <value>VPG0004</value>
+            <comment>&#34;VPG has low journal history&#34;.  This is covered by the Journal SLA alerts.</comment>
+            <op>NotEqual</op>
+        </preeventsourcefilter>
+        <preeventsourcefilter>
+            <name>zerto.alertType</name>
+            <value>VPG0010</value>
+            <comment>&#34;VPG target RPO exceeded&#34;.  This is covered by the RPO SLA alerts.</comment>
+            <op>NotEqual</op>
+        </preeventsourcefilter>
+        <preeventsourcefilter>
+            <name>zerto.alertType</name>
+            <value>VRA0039</value>
+            <comment>&#34;Journal reached configured limit&#34;. This is covered by the Journal SLA alerts.</comment>
+            <op>NotEqual</op>
+        </preeventsourcefilter>
+        <preeventsourcefilter>
+            <name>Severity</name>
+            <value>error</value>
+            <comment></comment>
+            <op>Equal</op>
+        </preeventsourcefilter>
+        </filters>
+        <scripts>
+        </scripts>
+    </entry>
+</feed>

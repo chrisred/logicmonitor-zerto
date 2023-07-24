@@ -1,0 +1,758 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<feed  version="1.0" hasPendingRequests="false" >
+  <company></company>
+  <status>200</status>
+  <errmsg>OK</errmsg>
+  <interval>0</interval>
+    <entry type="predatasource">
+        <version>1689374840</version>
+        <name>ZertoAnalytics_Sites</name>
+        <displayedas>Zerto Analytics Sites</displayedas>
+        <description>Zerto site metrics.</description>
+        <collector>batchscript</collector>
+        <hasMultiInstances>true</hasMultiInstances>
+        <useWildValueAsUniqueIdentifier>true</useWildValueAsUniqueIdentifier>
+        <schedule>360</schedule>
+        <appliesTo>hasCategory(&#34;ZertoAnalytics&#34;)</appliesTo>
+        <wildcardauto>true</wildcardauto>
+        <wildcardpersist>false</wildcardpersist>
+        <wildcardlinuxscript>ad_script</wildcardlinuxscript>
+        <wildcardlinuxcmdline>type=&#34;embeded&#34; </wildcardlinuxcmdline>
+        <wildcardwinscript>ad_script</wildcardwinscript>
+        <wildcardwincmdline>type=&#34;embeded&#34; </wildcardwincmdline>
+        <wildcardgroovyscript>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
+
+import groovy.json.JsonSlurper
+import org.apache.http.client.utils.URIBuilder
+
+// core http classes
+import org.apache.http.auth.AuthScope
+import org.apache.http.auth.Credentials
+import org.apache.http.auth.NTCredentials
+import org.apache.http.client.config.*
+import org.apache.http.client.entity.*
+import org.apache.http.client.methods.*
+import org.apache.http.client.ServiceUnavailableRetryStrategy
+import org.apache.http.conn.ssl.NoopHostnameVerifier
+import org.apache.http.conn.ssl.TrustSelfSignedStrategy
+import org.apache.http.entity.*
+import org.apache.http.Header
+import org.apache.http.HttpResponse
+import org.apache.http.impl.client.BasicCredentialsProvider
+import org.apache.http.impl.client.CloseableHttpClient
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.impl.client.HttpClientBuilder
+import org.apache.http.impl.client.StandardHttpRequestRetryHandler
+import org.apache.http.ssl.SSLContextBuilder
+import org.apache.http.util.EntityUtils
+
+// LM properties
+def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
+def propHost = hostProps.get(&#39;zertoanalytics.host&#39;) ?: propSystemHost
+def propUser = hostProps.get(&#39;zertoanalytics.user&#39;)
+def propPass = hostProps.get(&#39;zertoanalytics.pass&#39;)
+
+try
+{
+    def sessionToken = getSessionToken(propHost, propUser, propPass)
+
+    if (sessionToken == &#39;&#39;)
+    {
+        println &#39;Error: Invalid session token).&#39;
+        return 2
+    }
+
+    // GET request
+    def mainUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setHost(propHost)
+        .setPath(&#39;/v2/monitoring/sites&#39;)
+
+    def httpGet = new HttpGet(mainUriBuilder.build())
+    httpGet.setHeader(&#39;Authorization&#39;, &#34;Bearer ${sessionToken}&#34;)
+
+    def mainResponse = runRequest(httpGet)
+
+    if (mainResponse.code != 200)
+    {
+        println &#34;Error: Bad response code (${mainResponse.code}).&#34;
+        return 3
+    }
+
+    def jsonSlurper = new JsonSlurper()
+    def jsonResponse = jsonSlurper.parseText(mainResponse.body)
+
+    jsonResponse.each { site -&#62;
+        def wildValue = site.identifier
+        def wildAlias = site.name
+
+        def instanceProperties = [
+            &#39;zertoanalytics.zvmip&#39; : site.zvmIp,
+            &#39;zertoanalytics.type&#39; : site.type
+        ]
+
+        // Encode the instance property strings to escape any HTTP/URL special characters, the wild value/alias strings
+        // appear to be encoded by LogicMontor automatically.
+        instanceProperyStrings = instanceProperties.collect { property, value -&#62;
+            URLEncoder.encode(property, &#39;UTF-8&#39;) + &#39;=&#39; + URLEncoder.encode(value.toString(), &#39;UTF-8&#39;)
+        }
+
+        println &#34;${wildValue}##${wildAlias}######${instanceProperyStrings.join(&#39;&#38;&#39;)}&#34;
+    }
+
+    return 0
+}
+catch (Exception e)
+{
+    println e
+    return 1
+}
+
+String getSessionToken(String host, String user, String pass)
+{
+    def sessionToken = &#39;&#39;
+
+    def postUriBuilder = new URIBuilder().setScheme(&#39;https&#39;).setHost(host).setPath(&#39;/v2/auth/token&#39;)
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/json&#39;)
+
+    def postData = &#34;&#34;&#34;{&#34;username&#34;: &#34;${user}&#34;,&#34;password&#34;: &#34;${pass}&#34;}&#34;&#34;&#34;
+    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        def jsonSlurper = new JsonSlurper()
+        def jsonResponse = jsonSlurper.parseText(postResponse.body)
+        sessionToken = jsonResponse.token
+    }
+
+    return sessionToken
+}
+
+Map runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)
+{
+    if (request instanceof HttpGet != true)
+    {
+        request.setEntity(entity)
+    }
+
+    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion
+    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient
+    def waitPeriod = 0L
+    def serviceRetry = [
+        retryRequest: { response, executionCount, context -&#62;
+            // increase the wait for each try, here we would wait 3, 6 and 9 seconds
+            waitPeriod += 3000L
+            def statusCode = response.getStatusLine().getStatusCode()
+            return executionCount &#60;= 3 &#38;&#38; (statusCode == 429 || statusCode == 500 || statusCode == 503)
+        },
+        getRetryInterval: {
+            return waitPeriod
+        }
+    ] as ServiceUnavailableRetryStrategy
+
+    // create an http client which retries for connection &#34;I/O&#34; errors and for certain http status codes
+    HttpClientBuilder httpClientBuilder = HttpClients.custom()
+        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())
+        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))
+        .setServiceUnavailableRetryStrategy(serviceRetry)
+
+    // allow self-signed certificates
+    httpClientBuilder.setSSLContext(
+        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()
+    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+
+    if (credentials)
+    {
+        // attempt authentication with credentials supported by the BasicCredentialsProvider
+        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()
+        credentialProvider.setCredentials(AuthScope.ANY, credentials)
+        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)
+    }
+
+    CloseableHttpClient httpClient = httpClientBuilder.build()
+    HttpResponse response = httpClient.execute(request)
+    String responseBody = null
+
+    if (response.getEntity())
+    {
+        // only attempt to convert the body to string if there is content
+        responseBody = EntityUtils.toString(response.getEntity())
+    }
+
+    Integer code = response.getStatusLine().getStatusCode()
+    List&#60;Header&#62; headers = response.getAllHeaders()
+
+    def responseMap = [
+        code: code,
+        headers: headers,
+        body: responseBody,
+    ]
+
+    httpClient.close()
+    return responseMap
+}
+</wildcardgroovyscript>
+        <wildcardschedule>1440</wildcardschedule>
+        <wildcarddisable>false</wildcarddisable>
+        <wildcarddeleteinactive>false</wildcarddeleteinactive>
+        <agdmethod>ilp</agdmethod>
+        <agdparams>zertoanalytics.type</agdparams>
+        <group></group>
+        <tags></tags>
+        <technology>Device Properties:
+
+zertoanalytics.host -- Optional, defaults to the device IP when not set.
+zertoanalytics.user -- The Zerto Analytics user name.
+zertoanalytics.pass -- The Zerto Analytics password.
+system.categories -- Add &#34;ZertoAnalytics&#34;.
+
+Notes:
+
+Details of the API should be available at https://docs.api.zerto.com. The current host address is https://analytics.api.zerto.com.</technology>
+        <adlist><![CDATA[{"agdmethod":"ilp","method":"ad_script","agdparams":"zertoanalytics.type","id":0,"filters":[],"params":{"type":"embeded","groovyscript":"// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto\n\nimport groovy.json.JsonSlurper\nimport org.apache.http.client.utils.URIBuilder\n\n// core http classes\nimport org.apache.http.auth.AuthScope\nimport org.apache.http.auth.Credentials\nimport org.apache.http.auth.NTCredentials\nimport org.apache.http.client.config.*\nimport org.apache.http.client.entity.*\nimport org.apache.http.client.methods.*\nimport org.apache.http.client.ServiceUnavailableRetryStrategy\nimport org.apache.http.conn.ssl.NoopHostnameVerifier\nimport org.apache.http.conn.ssl.TrustSelfSignedStrategy\nimport org.apache.http.entity.*\nimport org.apache.http.Header\nimport org.apache.http.HttpResponse\nimport org.apache.http.impl.client.BasicCredentialsProvider\nimport org.apache.http.impl.client.CloseableHttpClient\nimport org.apache.http.impl.client.HttpClients\nimport org.apache.http.impl.client.HttpClientBuilder\nimport org.apache.http.impl.client.StandardHttpRequestRetryHandler\nimport org.apache.http.ssl.SSLContextBuilder\nimport org.apache.http.util.EntityUtils\n\n// LM properties\ndef propSystemHost = hostProps.get('system.hostname')\ndef propHost = hostProps.get('zertoanalytics.host') ?: propSystemHost\ndef propUser = hostProps.get('zertoanalytics.user')\ndef propPass = hostProps.get('zertoanalytics.pass')\n\ntry\n{\n    def sessionToken = getSessionToken(propHost, propUser, propPass)\n\n    if (sessionToken == '')\n    {\n        println 'Error: Invalid session token).'\n        return 2\n    }\n\n    // GET request\n    def mainUriBuilder = new URIBuilder()\n        .setScheme('https')\n        .setHost(propHost)\n        .setPath('/v2/monitoring/sites')\n\n    def httpGet = new HttpGet(mainUriBuilder.build())\n    httpGet.setHeader('Authorization', \"Bearer ${sessionToken}\")\n\n    def mainResponse = runRequest(httpGet)\n\n    if (mainResponse.code != 200)\n    {\n        println \"Error: Bad response code (${mainResponse.code}).\"\n        return 3\n    }\n\n    def jsonSlurper = new JsonSlurper()\n    def jsonResponse = jsonSlurper.parseText(mainResponse.body)\n\n    jsonResponse.each { site ->\n        def wildValue = site.identifier\n        def wildAlias = site.name\n\n        def instanceProperties = [\n            'zertoanalytics.zvmip' : site.zvmIp,\n            'zertoanalytics.type' : site.type\n        ]\n\n        // Encode the instance property strings to escape any HTTP/URL special characters, the wild value/alias strings\n        // appear to be encoded by LogicMontor automatically.\n        instanceProperyStrings = instanceProperties.collect { property, value ->\n            URLEncoder.encode(property, 'UTF-8') + '=' + URLEncoder.encode(value.toString(), 'UTF-8')\n        }\n\n        println \"${wildValue}##${wildAlias}######${instanceProperyStrings.join('&')}\"\n    }\n\n    return 0\n}\ncatch (Exception e)\n{\n    println e\n    return 1\n}\n\nString getSessionToken(String host, String user, String pass)\n{\n    def sessionToken = ''\n\n    def postUriBuilder = new URIBuilder().setScheme('https').setHost(host).setPath('/v2/auth/token')\n    def httpPost = new HttpPost(postUriBuilder.build())\n    httpPost.setHeader('Content-Type', 'application/json')\n\n    def postData = \"\"\"{\"username\": \"${user}\",\"password\": \"${pass}\"}\"\"\"\n    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)\n\n    def postResponse = runRequest(httpPost, null, postEntity)\n\n    if (postResponse.code == 200)\n    {\n        def jsonSlurper = new JsonSlurper()\n        def jsonResponse = jsonSlurper.parseText(postResponse.body)\n        sessionToken = jsonResponse.token\n    }\n\n    return sessionToken\n}\n\nMap runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)\n{\n    if (request instanceof HttpGet != true)\n    {\n        request.setEntity(entity)\n    }\n\n    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion\n    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient\n    def waitPeriod = 0L\n    def serviceRetry = [\n        retryRequest: { response, executionCount, context ->\n            // increase the wait for each try, here we would wait 3, 6 and 9 seconds\n            waitPeriod += 3000L\n            def statusCode = response.getStatusLine().getStatusCode()\n            return executionCount <= 3 && (statusCode == 429 || statusCode == 500 || statusCode == 503)\n        },\n        getRetryInterval: {\n            return waitPeriod\n        }\n    ] as ServiceUnavailableRetryStrategy\n\n    // create an http client which retries for connection \"I/O\" errors and for certain http status codes\n    HttpClientBuilder httpClientBuilder = HttpClients.custom()\n        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())\n        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))\n        .setServiceUnavailableRetryStrategy(serviceRetry)\n\n    // allow self-signed certificates\n    httpClientBuilder.setSSLContext(\n        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()\n    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)\n\n    if (credentials)\n    {\n        // attempt authentication with credentials supported by the BasicCredentialsProvider\n        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()\n        credentialProvider.setCredentials(AuthScope.ANY, credentials)\n        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)\n    }\n\n    CloseableHttpClient httpClient = httpClientBuilder.build()\n    HttpResponse response = httpClient.execute(request)\n    String responseBody = null\n\n    if (response.getEntity())\n    {\n        // only attempt to convert the body to string if there is content\n        responseBody = EntityUtils.toString(response.getEntity())\n    }\n\n    Integer code = response.getStatusLine().getStatusCode()\n    List<Header> headers = response.getAllHeaders()\n\n    def responseMap = [\n        code: code,\n        headers: headers,\n        body: responseBody,\n    ]\n\n    httpClient.close()\n    return responseMap\n}\n"}}]]></adlist>
+        <schemaVersion>2</schemaVersion>
+        <dataSourceType>1</dataSourceType>
+        <attributes>
+        <attribute>
+            <name>scripttype</name>
+            <value>embed</value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>scriptgroovy</name>
+            <value>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
+
+import groovy.json.JsonSlurper
+import org.apache.http.client.utils.URIBuilder
+
+// core http classes
+import org.apache.http.auth.AuthScope
+import org.apache.http.auth.Credentials
+import org.apache.http.auth.NTCredentials
+import org.apache.http.client.config.*
+import org.apache.http.client.entity.*
+import org.apache.http.client.methods.*
+import org.apache.http.client.ServiceUnavailableRetryStrategy
+import org.apache.http.conn.ssl.NoopHostnameVerifier
+import org.apache.http.conn.ssl.TrustSelfSignedStrategy
+import org.apache.http.entity.*
+import org.apache.http.Header
+import org.apache.http.HttpResponse
+import org.apache.http.impl.client.BasicCredentialsProvider
+import org.apache.http.impl.client.CloseableHttpClient
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.impl.client.HttpClientBuilder
+import org.apache.http.impl.client.StandardHttpRequestRetryHandler
+import org.apache.http.ssl.SSLContextBuilder
+import org.apache.http.util.EntityUtils
+
+// LM properties
+def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
+def propHost = hostProps.get(&#39;zertoanalytics.host&#39;) ?: propSystemHost
+def propUser = hostProps.get(&#39;zertoanalytics.user&#39;)
+def propPass = hostProps.get(&#39;zertoanalytics.pass&#39;)
+
+Map connectionStatus = [
+    &#39;Connected&#39;: 0,
+    &#39;TemporaryDisconnected&#39;: 1,
+    &#39;PermanentDisconnected&#39;: 2
+]
+
+try
+{
+    def sessionToken = getSessionToken(propHost, propUser, propPass)
+
+    if (sessionToken == &#39;&#39;)
+    {
+        println &#39;Error: Invalid session token).&#39;
+        return 2
+    }
+
+    // GET request
+    def mainUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setHost(propHost)
+        .setPath(&#39;/v2/monitoring/sites&#39;)
+        .setParameter(&#39;format&#39;, &#39;topology&#39;)
+
+    def httpGet = new HttpGet(mainUriBuilder.build())
+    httpGet.setHeader(&#39;Authorization&#39;, &#34;Bearer ${sessionToken}&#34;)
+
+    def mainResponse = runRequest(httpGet)
+
+    if (mainResponse.code != 200)
+    {
+        println &#34;Error: Bad response code (${mainResponse.code}).&#34;
+        return 3
+    }
+
+    def jsonSlurper = new JsonSlurper()
+    def jsonResponse = jsonSlurper.parseText(mainResponse.body)
+
+    jsonResponse.each { site -&#62;
+        def wildValue = site.identifier
+        def incomingVpgs = 0
+        def outgoingVpgs = 0
+
+        site.incomingFromSites.each { incoming -&#62;
+            incomingVpgs += incoming.directedVpgsCount
+        }
+
+        site.outgoingToSites.each { outgoing -&#62;
+            outgoingVpgs += outgoing.directedVpgsCount
+        }
+
+        output(&#39;ConnectionStatus&#39;, connectionStatus.getOrDefault(site.connectionStatus, -1), wildValue)
+        output(&#39;IncomingVpgs&#39;, incomingVpgs, wildValue)
+        output(&#39;OutgoingVpgs&#39;, outgoingVpgs, wildValue)
+        output(&#39;SelfVpgsCount&#39;, site.selfVpgsCount, wildValue)
+    }
+
+    return 0
+}
+catch (Exception e)
+{
+    println e
+    return 1
+}
+
+String getSessionToken(String host, String user, String pass)
+{
+    def sessionToken = &#39;&#39;
+
+    def postUriBuilder = new URIBuilder().setScheme(&#39;https&#39;).setHost(host).setPath(&#39;/v2/auth/token&#39;)
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/json&#39;)
+
+    def postData = &#34;&#34;&#34;{&#34;username&#34;: &#34;${user}&#34;,&#34;password&#34;: &#34;${pass}&#34;}&#34;&#34;&#34;
+    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        def jsonSlurper = new JsonSlurper()
+        def jsonResponse = jsonSlurper.parseText(postResponse.body)
+        sessionToken = jsonResponse.token
+    }
+
+    return sessionToken
+}
+
+Map runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)
+{
+    if (request instanceof HttpGet != true)
+    {
+        request.setEntity(entity)
+    }
+
+    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion
+    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient
+    def waitPeriod = 0L
+    def serviceRetry = [
+        retryRequest: { response, executionCount, context -&#62;
+            // increase the wait for each try, here we would wait 3, 6 and 9 seconds
+            waitPeriod += 3000L
+            def statusCode = response.getStatusLine().getStatusCode()
+            return executionCount &#60;= 3 &#38;&#38; (statusCode == 429 || statusCode == 500 || statusCode == 503)
+        },
+        getRetryInterval: {
+            return waitPeriod
+        }
+    ] as ServiceUnavailableRetryStrategy
+
+    // create an http client which retries for connection &#34;I/O&#34; errors and for certain http status codes
+    HttpClientBuilder httpClientBuilder = HttpClients.custom()
+        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())
+        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))
+        .setServiceUnavailableRetryStrategy(serviceRetry)
+
+    // allow self-signed certificates
+    httpClientBuilder.setSSLContext(
+        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()
+    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+
+    if (credentials)
+    {
+        // attempt authentication with credentials supported by the BasicCredentialsProvider
+        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()
+        credentialProvider.setCredentials(AuthScope.ANY, credentials)
+        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)
+    }
+
+    CloseableHttpClient httpClient = httpClientBuilder.build()
+    HttpResponse response = httpClient.execute(request)
+    String responseBody = null
+
+    if (response.getEntity())
+    {
+        // only attempt to convert the body to string if there is content
+        responseBody = EntityUtils.toString(response.getEntity())
+    }
+
+    Integer code = response.getStatusLine().getStatusCode()
+    List&#60;Header&#62; headers = response.getAllHeaders()
+
+    def responseMap = [
+        code: code,
+        headers: headers,
+        body: responseBody,
+    ]
+
+    httpClient.close()
+    return responseMap
+}
+
+void output(key, value, instanceId=null)
+{
+    if (value instanceof BigDecimal)
+    {
+        // make sure BigDecimal does not render to string with Scientific Notation
+        value = value.toPlainString()
+    }
+
+    if (value instanceof Boolean)
+    {
+        value = value ? 1:0
+    }
+
+    if (instanceId)
+    {
+        println &#34;${instanceId}.${key}=${value}&#34;
+    }
+    else
+    {
+        println &#34;${key}=${value}&#34;
+    }
+}</value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>windowsscript</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>linuxscript</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>windowscmdline</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>linuxcmdline</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        </attributes>
+        <datapoints>
+        <datapoint>
+            <name>ConnectionStatus</name>
+            <originId>MD7uc-cdQ9-hJsXoMxD8uA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.ConnectionStatus</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr>&#62;= 1 2</alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody>The Zerto site ##INSTANCE## has reported a status of ##VALUE##, placing resource into a ##LEVEL## level.
+
+This started at ##START##, -- or ##DURATION## ago.
+
+Status codes:
+0=Connected
+1=TemporaryDisconnected
+2=PermanentDisconnected</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>Connection status of the site.
+
+Status codes:
+0=Connected
+1=TemporaryDisconnected
+2=PermanentDisconnected</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>4</alertTransitionIval>
+            <alertClearTransitionIval>1</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>OutgoingVpgs</name>
+            <originId>eZfpJuCqTn2-PyPptNsX4w</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.OutgoingVpgs</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>VPGs being replicated to a recovery site.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>IncomingVpgs</name>
+            <originId>X70Yg-MRRb6Fs01SiszJlw</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.IncomingVpgs</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>VPGs being replicated from a protected site.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>SelfVpgsCount</name>
+            <originId>gEpjapyeRp-aglvjIFfcGA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.SelfVpgsCount</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>VPGs being replicated to the same site.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>ExitCode</name>
+            <originId>9cYdKEGPSfqznNJ18yvjAQ</originId>
+            <dataType>4</dataType>
+            <type>2</type>
+            <postprocessormethod>none</postprocessormethod>
+            <postprocessorparam></postprocessorparam>
+            <usevalue>exitCode</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description></description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        </datapoints>
+        <graphs>
+        <graph>
+            <name>Connection Status</name>
+            <title>Connection Status</title>
+            <originId></originId>            <verticallabel>status code</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>NaN</minvalue>
+            <displayprio>1</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <graphdatapoints>
+        <graphdatapoint>
+            <name>ConnectionStatus</name>
+            <datapointname>ConnectionStatus</datapointname>
+            <originId></originId>
+            <cf>2</cf>
+        </graphdatapoint>
+            </graphdatapoints>
+            <graphvirtualdatapoints>
+            </graphvirtualdatapoints>
+            <graphdatas>
+            <graphdata>
+                <type>1</type>
+                <legend>Connection Status</legend>
+                <color>blue</color>
+                <datapointname>ConnectionStatus</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            </graphdatas>
+        </graph>
+        <graph>
+            <name>VPG Count</name>
+            <title>VPG Count</title>
+            <originId></originId>            <verticallabel>count</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>NaN</minvalue>
+            <displayprio>2</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <graphdatapoints>
+        <graphdatapoint>
+            <name>IncomingVpgs</name>
+            <datapointname>IncomingVpgs</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+        <graphdatapoint>
+            <name>OutgoingVpgs</name>
+            <datapointname>OutgoingVpgs</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+        <graphdatapoint>
+            <name>SelfVpgsCount</name>
+            <datapointname>SelfVpgsCount</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+            </graphdatapoints>
+            <graphvirtualdatapoints>
+            </graphvirtualdatapoints>
+            <graphdatas>
+            <graphdata>
+                <type>3</type>
+                <legend>Incoming VPGs</legend>
+                <color>green</color>
+                <datapointname>IncomingVpgs</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            <graphdata>
+                <type>3</type>
+                <legend>Outgoing VPGs</legend>
+                <color>orange</color>
+                <datapointname>OutgoingVpgs</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            <graphdata>
+                <type>3</type>
+                <legend>Same Site VPGs</legend>
+                <color>teal</color>
+                <datapointname>SelfVpgsCount</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            </graphdatas>
+        </graph>
+        </graphs>
+        <overviewgraphs>
+        <overviewgraph>
+            <name>VPG Count</name>
+            <title>VPG Count Overview</title>
+            <verticallabel>count</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>NaN</minvalue>
+            <displayprio>1</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <aggregated>false</aggregated>
+            <originId></originId>
+            <datapoints>
+        <overviewgraphdatapoint>
+            <name>IncomingVpgs</name>
+            <datapointname>IncomingVpgs</datapointname>
+            <cf>1</cf>
+            <aggregateMethod>sum</aggregateMethod>
+            <originId></originId>
+        </overviewgraphdatapoint>
+        <overviewgraphdatapoint>
+            <name>OutgoingVpgs</name>
+            <datapointname>OutgoingVpgs</datapointname>
+            <cf>1</cf>
+            <aggregateMethod>sum</aggregateMethod>
+            <originId></originId>
+        </overviewgraphdatapoint>
+        <overviewgraphdatapoint>
+            <name>SelfVpgsCount</name>
+            <datapointname>SelfVpgsCount</datapointname>
+            <cf>1</cf>
+            <aggregateMethod>sum</aggregateMethod>
+            <originId></originId>
+        </overviewgraphdatapoint>
+            </datapoints>
+            <virtualdatapoints>
+        <overviewgraphvirtualdatapoint>
+            <name>TotalVpgs</name>
+            <rpn>IncomingVpgs + OutgoingVpgs + SelfVpgsCount</rpn>
+            <originId></originId>
+        </overviewgraphvirtualdatapoint>
+            </virtualdatapoints>
+            <lines>
+            <overviewgraphline>
+                <type>1</type>
+                <legend>##INSTANCE##</legend>
+                <datapointname>IncomingVpgs</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+                <color>silver</color>
+            </overviewgraphline>
+            </lines>
+        </overviewgraph>
+        </overviewgraphs>
+        <scripts>
+        </scripts>
+    </entry>
+</feed>
