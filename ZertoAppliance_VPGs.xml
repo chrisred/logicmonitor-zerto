@@ -1,0 +1,1455 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<feed  version="1.0" hasPendingRequests="false" >
+  <company></company>
+  <status>200</status>
+  <errmsg>OK</errmsg>
+  <interval>0</interval>
+    <entry type="predatasource">
+        <version>1690489552</version>
+        <name>ZertoAppliance_VPGs</name>
+        <displayedas>Zerto Appliance VPGs</displayedas>
+        <description>VPG SLA failures and metrics.</description>
+        <collector>batchscript</collector>
+        <hasMultiInstances>true</hasMultiInstances>
+        <useWildValueAsUniqueIdentifier>true</useWildValueAsUniqueIdentifier>
+        <schedule>720</schedule>
+        <appliesTo>hasCategory(&#34;ZertoAppliance&#34;)</appliesTo>
+        <wildcardauto>true</wildcardauto>
+        <wildcardpersist>false</wildcardpersist>
+        <wildcardlinuxscript>ad_script</wildcardlinuxscript>
+        <wildcardlinuxcmdline>type=&#34;embeded&#34; </wildcardlinuxcmdline>
+        <wildcardwinscript>ad_script</wildcardwinscript>
+        <wildcardwincmdline>type=&#34;embeded&#34; </wildcardwincmdline>
+        <wildcardgroovyscript>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
+
+import groovy.json.JsonSlurper
+import org.apache.http.client.utils.URIBuilder
+
+// core http classes
+import org.apache.http.auth.AuthScope
+import org.apache.http.auth.Credentials
+import org.apache.http.auth.NTCredentials
+import org.apache.http.client.config.*
+import org.apache.http.client.entity.*
+import org.apache.http.client.methods.*
+import org.apache.http.client.ServiceUnavailableRetryStrategy
+import org.apache.http.conn.ssl.NoopHostnameVerifier
+import org.apache.http.conn.ssl.TrustSelfSignedStrategy
+import org.apache.http.entity.*
+import org.apache.http.Header
+import org.apache.http.HttpResponse
+import org.apache.http.impl.client.BasicCredentialsProvider
+import org.apache.http.impl.client.CloseableHttpClient
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.impl.client.HttpClientBuilder
+import org.apache.http.impl.client.StandardHttpRequestRetryHandler
+import org.apache.http.ssl.SSLContextBuilder
+import org.apache.http.util.EntityUtils
+
+// LM properties
+def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
+def propHost = hostProps.get(&#39;zertoappliance.host&#39;) ?: propSystemHost
+def propPort = hostProps.get(&#39;zertoappliance.port&#39;)?.isInteger() ?
+    hostProps.get(&#39;zertoappliance.port&#39;).toInteger() : 9669
+def propUser = hostProps.get(&#39;zertoappliance.user&#39;)
+def propPass = hostProps.get(&#39;zertoappliance.pass&#39;)
+
+try
+{
+    def sessionKey = getSessionKey(propHost, propPort, propUser, propPass)
+
+    if (sessionKey == &#39;&#39;)
+    {
+        println &#39;Error: Invalid session key.&#39;
+        return 2
+    }
+
+    // GET request
+    def mainUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setHost(propHost)
+        .setPort(propPort)
+        .setPath(&#39;/v1/vpgs&#39;)
+
+    def httpGet = new HttpGet(mainUriBuilder.build())
+    httpGet.setHeader(&#39;x-zerto-session&#39;, sessionKey)
+
+    def mainResponse = runRequest(httpGet)
+
+    if (mainResponse.code != 200)
+    {
+        println &#34;Error: Bad response code (${mainResponse.code}).&#34;
+        return 3
+    }
+
+    def jsonSlurper = new JsonSlurper()
+    def jsonResponse = jsonSlurper.parseText(mainResponse.body)
+
+    jsonResponse.each { vpg -&#62;
+        def wildValue = vpg.VpgIdentifier
+        def wildAlias = vpg.VpgName
+        def vpgDirection = vpg.RecoverySite.type == &#39;PeerSiteApi&#39; ? &#39;Outgoing&#39; : &#39;Incoming&#39;
+
+        def instanceProperties = [
+            &#39;zertoappliance.vpgtype&#39; : vpg.VpgType,
+            &#39;zertoappliance.vpgdirection&#39; : vpgDirection,
+            &#39;zertoappliance.protectedsite&#39; : vpg.ProtectedSiteName,
+            &#39;zertoappliance.recoverysite&#39; : vpg.RecoverySiteName,
+        ]
+
+        // Encode the instance property strings to escape any HTTP/URL special characters, the wild value/alias strings
+        // appear to be encoded by LogicMontor automatically.
+        instanceProperyStrings = instanceProperties.collect { property, value -&#62;
+            URLEncoder.encode(property, &#39;UTF-8&#39;) + &#39;=&#39; + URLEncoder.encode(value.toString(), &#39;UTF-8&#39;)
+        }
+
+        println &#34;${wildValue}##${wildAlias}######${instanceProperyStrings.join(&#39;&#38;&#39;)}&#34;
+    }
+
+    return 0
+}
+catch (Exception e)
+{
+    println e
+    return 1
+}
+
+String getSessionKey(String host, Integer port, String user, String pass)
+{
+    def sessionKey = &#39;&#39;
+    def base64Auth = &#34;${user}:${pass}&#34;.bytes.encodeBase64().toString()
+
+    def postUriBuilder = new URIBuilder().setScheme(&#39;https&#39;).setHost(host).setPort(port).setPath(&#39;/v1/session/add&#39;)
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader(&#39;Authorization&#39; , &#34;Basic ${base64Auth}&#34;)
+    httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/json&#39;)
+
+    def postData = &#39;{&#34;authenticationMethod&#34;: 1}&#39;
+    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        sessionKey = postResponse.headers.find { it.getName() == &#39;x-zerto-session&#39; }.getValue()
+    }
+
+    return sessionKey
+}
+
+Map runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)
+{
+    if (request instanceof HttpGet != true)
+    {
+        request.setEntity(entity)
+    }
+
+    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion
+    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient
+    def waitPeriod = 0L
+    def serviceRetry = [
+        retryRequest: { response, executionCount, context -&#62;
+            // increase the wait for each try, here we would wait 3, 6 and 9 seconds
+            waitPeriod += 3000L
+            def statusCode = response.getStatusLine().getStatusCode()
+            return executionCount &#60;= 3 &#38;&#38; (statusCode == 429 || statusCode == 500 || statusCode == 503)
+        },
+        getRetryInterval: {
+            return waitPeriod
+        }
+    ] as ServiceUnavailableRetryStrategy
+
+    // create an http client which retries for connection &#34;I/O&#34; errors and for certain http status codes
+    HttpClientBuilder httpClientBuilder = HttpClients.custom()
+        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())
+        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))
+        .setServiceUnavailableRetryStrategy(serviceRetry)
+
+    // allow self-signed certificates
+    httpClientBuilder.setSSLContext(
+        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()
+    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+
+    if (credentials)
+    {
+        // attempt authentication with credentials supported by the BasicCredentialsProvider
+        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()
+        credentialProvider.setCredentials(AuthScope.ANY, credentials)
+        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)
+    }
+
+    CloseableHttpClient httpClient = httpClientBuilder.build()
+    HttpResponse response = httpClient.execute(request)
+    String responseBody = null
+
+    if (response.getEntity())
+    {
+        // only attempt to convert the body to string if there is content
+        responseBody = EntityUtils.toString(response.getEntity())
+    }
+
+    Integer code = response.getStatusLine().getStatusCode()
+    List&#60;Header&#62; headers = response.getAllHeaders()
+
+    def responseMap = [
+        code: code,
+        headers: headers,
+        body: responseBody,
+    ]
+
+    httpClient.close()
+    return responseMap
+}
+</wildcardgroovyscript>
+        <wildcardschedule>1440</wildcardschedule>
+        <wildcarddisable>false</wildcarddisable>
+        <wildcarddeleteinactive>false</wildcarddeleteinactive>
+        <agdmethod>ilp</agdmethod>
+        <agdparams>zertoappliance.vpgdirection</agdparams>
+        <group></group>
+        <tags></tags>
+        <technology>Device Properties:
+
+zertoappliance.host -- Optional, defaults to the device IP when not set.
+zertoappliance.port -- Optional, defaults to 9669.
+zertoappliance.user -- The user name (in the UPN or NetBIOS form as necessary).
+zertoappliance.pass -- The user password.
+system.categories -- Add &#34;ZertoAppliance&#34;.
+
+Notes:
+
+Requires access to the API endpoint on the ZVM or ZCM appliance. Details of the API are available at https://&#60;your-appliance-ip&#62;:9669/swagger/index.html
+
+The &#34;RpoSlaAlert_&#34; and &#34;JournalSlaAlert_&#34; datapoints can be used to alert when the SLA has been failing for the period noted in the suffix.
+
+For example, &#34;RpoSlaAlert_2hrs&#34; will alert after the RPO SLA for a VPG has been failed for 2 hours.
+
+This allows for alert noise reduction based on how long of an SLA failure can be tolerated.
+
+A threshold (= 1) should be set in alert tuning to enable alerting.</technology>
+        <adlist><![CDATA[{"agdmethod":"ilp","method":"ad_script","agdparams":"zertoappliance.vpgdirection","id":0,"filters":[],"params":{"type":"embeded","groovyscript":"// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto\n\nimport groovy.json.JsonSlurper\nimport org.apache.http.client.utils.URIBuilder\n\n// core http classes\nimport org.apache.http.auth.AuthScope\nimport org.apache.http.auth.Credentials\nimport org.apache.http.auth.NTCredentials\nimport org.apache.http.client.config.*\nimport org.apache.http.client.entity.*\nimport org.apache.http.client.methods.*\nimport org.apache.http.client.ServiceUnavailableRetryStrategy\nimport org.apache.http.conn.ssl.NoopHostnameVerifier\nimport org.apache.http.conn.ssl.TrustSelfSignedStrategy\nimport org.apache.http.entity.*\nimport org.apache.http.Header\nimport org.apache.http.HttpResponse\nimport org.apache.http.impl.client.BasicCredentialsProvider\nimport org.apache.http.impl.client.CloseableHttpClient\nimport org.apache.http.impl.client.HttpClients\nimport org.apache.http.impl.client.HttpClientBuilder\nimport org.apache.http.impl.client.StandardHttpRequestRetryHandler\nimport org.apache.http.ssl.SSLContextBuilder\nimport org.apache.http.util.EntityUtils\n\n// LM properties\ndef propSystemHost = hostProps.get('system.hostname')\ndef propHost = hostProps.get('zertoappliance.host') ?: propSystemHost\ndef propPort = hostProps.get('zertoappliance.port')?.isInteger() ?\n    hostProps.get('zertoappliance.port').toInteger() : 9669\ndef propUser = hostProps.get('zertoappliance.user')\ndef propPass = hostProps.get('zertoappliance.pass')\n\ntry\n{\n    def sessionKey = getSessionKey(propHost, propPort, propUser, propPass)\n\n    if (sessionKey == '')\n    {\n        println 'Error: Invalid session key.'\n        return 2\n    }\n\n    // GET request\n    def mainUriBuilder = new URIBuilder()\n        .setScheme('https')\n        .setHost(propHost)\n        .setPort(propPort)\n        .setPath('/v1/vpgs')\n\n    def httpGet = new HttpGet(mainUriBuilder.build())\n    httpGet.setHeader('x-zerto-session', sessionKey)\n\n    def mainResponse = runRequest(httpGet)\n\n    if (mainResponse.code != 200)\n    {\n        println \"Error: Bad response code (${mainResponse.code}).\"\n        return 3\n    }\n\n    def jsonSlurper = new JsonSlurper()\n    def jsonResponse = jsonSlurper.parseText(mainResponse.body)\n\n    jsonResponse.each { vpg ->\n        def wildValue = vpg.VpgIdentifier\n        def wildAlias = vpg.VpgName\n        def vpgDirection = vpg.RecoverySite.type == 'PeerSiteApi' ? 'Outgoing' : 'Incoming'\n\n        def instanceProperties = [\n            'zertoappliance.vpgtype' : vpg.VpgType,\n            'zertoappliance.vpgdirection' : vpgDirection,\n            'zertoappliance.protectedsite' : vpg.ProtectedSiteName,\n            'zertoappliance.recoverysite' : vpg.RecoverySiteName,\n        ]\n\n        // Encode the instance property strings to escape any HTTP/URL special characters, the wild value/alias strings\n        // appear to be encoded by LogicMontor automatically.\n        instanceProperyStrings = instanceProperties.collect { property, value ->\n            URLEncoder.encode(property, 'UTF-8') + '=' + URLEncoder.encode(value.toString(), 'UTF-8')\n        }\n\n        println \"${wildValue}##${wildAlias}######${instanceProperyStrings.join('&')}\"\n    }\n\n    return 0\n}\ncatch (Exception e)\n{\n    println e\n    return 1\n}\n\nString getSessionKey(String host, Integer port, String user, String pass)\n{\n    def sessionKey = ''\n    def base64Auth = \"${user}:${pass}\".bytes.encodeBase64().toString()\n\n    def postUriBuilder = new URIBuilder().setScheme('https').setHost(host).setPort(port).setPath('/v1/session/add')\n    def httpPost = new HttpPost(postUriBuilder.build())\n    httpPost.setHeader('Authorization' , \"Basic ${base64Auth}\")\n    httpPost.setHeader('Content-Type', 'application/json')\n\n    def postData = '{\"authenticationMethod\": 1}'\n    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)\n\n    def postResponse = runRequest(httpPost, null, postEntity)\n\n    if (postResponse.code == 200)\n    {\n        sessionKey = postResponse.headers.find { it.getName() == 'x-zerto-session' }.getValue()\n    }\n\n    return sessionKey\n}\n\nMap runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)\n{\n    if (request instanceof HttpGet != true)\n    {\n        request.setEntity(entity)\n    }\n\n    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion\n    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient\n    def waitPeriod = 0L\n    def serviceRetry = [\n        retryRequest: { response, executionCount, context ->\n            // increase the wait for each try, here we would wait 3, 6 and 9 seconds\n            waitPeriod += 3000L\n            def statusCode = response.getStatusLine().getStatusCode()\n            return executionCount <= 3 && (statusCode == 429 || statusCode == 500 || statusCode == 503)\n        },\n        getRetryInterval: {\n            return waitPeriod\n        }\n    ] as ServiceUnavailableRetryStrategy\n\n    // create an http client which retries for connection \"I/O\" errors and for certain http status codes\n    HttpClientBuilder httpClientBuilder = HttpClients.custom()\n        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())\n        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))\n        .setServiceUnavailableRetryStrategy(serviceRetry)\n\n    // allow self-signed certificates\n    httpClientBuilder.setSSLContext(\n        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()\n    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)\n\n    if (credentials)\n    {\n        // attempt authentication with credentials supported by the BasicCredentialsProvider\n        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()\n        credentialProvider.setCredentials(AuthScope.ANY, credentials)\n        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)\n    }\n\n    CloseableHttpClient httpClient = httpClientBuilder.build()\n    HttpResponse response = httpClient.execute(request)\n    String responseBody = null\n\n    if (response.getEntity())\n    {\n        // only attempt to convert the body to string if there is content\n        responseBody = EntityUtils.toString(response.getEntity())\n    }\n\n    Integer code = response.getStatusLine().getStatusCode()\n    List<Header> headers = response.getAllHeaders()\n\n    def responseMap = [\n        code: code,\n        headers: headers,\n        body: responseBody,\n    ]\n\n    httpClient.close()\n    return responseMap\n}\n"}}]]></adlist>
+        <schemaVersion>2</schemaVersion>
+        <dataSourceType>1</dataSourceType>
+        <attributes>
+        <attribute>
+            <name>scripttype</name>
+            <value>embed</value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>scriptgroovy</name>
+            <value>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
+
+import groovy.json.JsonSlurper
+import org.apache.http.client.utils.URIBuilder
+
+// core http classes
+import org.apache.http.auth.AuthScope
+import org.apache.http.auth.Credentials
+import org.apache.http.auth.NTCredentials
+import org.apache.http.client.config.*
+import org.apache.http.client.entity.*
+import org.apache.http.client.methods.*
+import org.apache.http.client.ServiceUnavailableRetryStrategy
+import org.apache.http.conn.ssl.NoopHostnameVerifier
+import org.apache.http.conn.ssl.TrustSelfSignedStrategy
+import org.apache.http.entity.*
+import org.apache.http.Header
+import org.apache.http.HttpResponse
+import org.apache.http.impl.client.BasicCredentialsProvider
+import org.apache.http.impl.client.CloseableHttpClient
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.impl.client.HttpClientBuilder
+import org.apache.http.impl.client.StandardHttpRequestRetryHandler
+import org.apache.http.ssl.SSLContextBuilder
+import org.apache.http.util.EntityUtils
+
+// LM properties
+def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
+def propHost = hostProps.get(&#39;zertoappliance.host&#39;) ?: propSystemHost
+def propPort = hostProps.get(&#39;zertoappliance.port&#39;)?.isInteger() ?
+    hostProps.get(&#39;zertoappliance.port&#39;).toInteger() : 9669
+def propUser = hostProps.get(&#39;zertoappliance.user&#39;)
+def propPass = hostProps.get(&#39;zertoappliance.pass&#39;)
+
+// map the status codes in order of severity, e.g. &#62; 5 is a failure state
+Map vpgStatus = [
+    0: 0, // Initializing
+    1: 1, // MeetingSLA
+    5: 2, // FailingOver
+    6: 3, // Moving
+    7: 4, // Deleting
+    8: 5, // Recovered
+    4: 6, // HistoryNotMeetingSLA
+    3: 7, // RpoNotMeetingSLA
+    2: 8  // NotMeetingSLA
+]
+
+try
+{
+    def sessionKey = getSessionKey(propHost, propPort, propUser, propPass)
+
+    if (sessionKey == &#39;&#39;)
+    {
+        println &#39;Error: Invalid session key.&#39;
+        return 2
+    }
+
+    // GET request
+    def mainUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setHost(propHost)
+        .setPort(propPort)
+        .setPath(&#39;/v1/vpgs&#39;)
+
+    def httpGet = new HttpGet(mainUriBuilder.build())
+    httpGet.setHeader(&#39;x-zerto-session&#39;, sessionKey)
+
+    def mainResponse = runRequest(httpGet)
+
+    if (mainResponse.code != 200)
+    {
+        println &#34;Error: Bad response code (${mainResponse.code}).&#34;
+        return 3
+    }
+
+    def jsonSlurper = new JsonSlurper()
+    def jsonResponse = jsonSlurper.parseText(mainResponse.body)
+
+    jsonResponse.each { vpg -&#62;
+        def wildValue = vpg.VpgIdentifier
+
+        output(&#39;VmsCount&#39;, vpg.VmsCount, wildValue)
+        output(&#39;ProvisionedStorageInMB&#39;, vpg.ProvisionedStorageInMB, wildValue)
+        output(&#39;UsedStorageInMB&#39;, vpg.UsedStorageInMB, wildValue)
+        output(&#39;ThroughputInMB&#39;, vpg.ThroughputInMB, wildValue)
+        output(&#39;ActualRPO&#39;, vpg.ActualRPO, wildValue)
+        output(&#39;ConfiguredRpoSeconds&#39;, vpg.ConfiguredRpoSeconds, wildValue)
+        output(&#39;Status&#39;, vpgStatus.get(vpg.Status, -1), wildValue)
+        output(&#39;SubStatus&#39;, vpg.SubStatus, wildValue)
+        output(&#39;ActualHistoryInMinutes&#39;, vpg.HistoryStatusApi.ActualHistoryInMinutes, wildValue)
+        output(&#39;ConfiguredHistoryInMinutes&#39;, vpg.HistoryStatusApi.ConfiguredHistoryInMinutes, wildValue)
+    }
+
+    return 0
+}
+catch (Exception e)
+{
+    println e
+    return 1
+}
+
+String getSessionKey(String host, Integer port, String user, String pass)
+{
+    def sessionKey = &#39;&#39;
+    def base64Auth = &#34;${user}:${pass}&#34;.bytes.encodeBase64().toString()
+
+    def postUriBuilder = new URIBuilder().setScheme(&#39;https&#39;).setHost(host).setPort(port).setPath(&#39;/v1/session/add&#39;)
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader(&#39;Authorization&#39; , &#34;Basic ${base64Auth}&#34;)
+    httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/json&#39;)
+
+    def postData = &#39;{&#34;authenticationMethod&#34;: 1}&#39;
+    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        sessionKey = postResponse.headers.find { it.getName() == &#39;x-zerto-session&#39; }.getValue()
+    }
+
+    return sessionKey
+}
+
+Map runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)
+{
+    if (request instanceof HttpGet != true)
+    {
+        request.setEntity(entity)
+    }
+
+    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion
+    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient
+    def waitPeriod = 0L
+    def serviceRetry = [
+        retryRequest: { response, executionCount, context -&#62;
+            // increase the wait for each try, here we would wait 3, 6 and 9 seconds
+            waitPeriod += 3000L
+            def statusCode = response.getStatusLine().getStatusCode()
+            return executionCount &#60;= 3 &#38;&#38; (statusCode == 429 || statusCode == 500 || statusCode == 503)
+        },
+        getRetryInterval: {
+            return waitPeriod
+        }
+    ] as ServiceUnavailableRetryStrategy
+
+    // create an http client which retries for connection &#34;I/O&#34; errors and for certain http status codes
+    HttpClientBuilder httpClientBuilder = HttpClients.custom()
+        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())
+        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))
+        .setServiceUnavailableRetryStrategy(serviceRetry)
+
+    // allow self-signed certificates
+    httpClientBuilder.setSSLContext(
+        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()
+    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+
+    if (credentials)
+    {
+        // attempt authentication with credentials supported by the BasicCredentialsProvider
+        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()
+        credentialProvider.setCredentials(AuthScope.ANY, credentials)
+        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)
+    }
+
+    CloseableHttpClient httpClient = httpClientBuilder.build()
+    HttpResponse response = httpClient.execute(request)
+    String responseBody = null
+
+    if (response.getEntity())
+    {
+        // only attempt to convert the body to string if there is content
+        responseBody = EntityUtils.toString(response.getEntity())
+    }
+
+    Integer code = response.getStatusLine().getStatusCode()
+    List&#60;Header&#62; headers = response.getAllHeaders()
+
+    def responseMap = [
+        code: code,
+        headers: headers,
+        body: responseBody,
+    ]
+
+    httpClient.close()
+    return responseMap
+}
+
+void output(key, value, instanceId=null)
+{
+    if (value instanceof BigDecimal)
+    {
+        // make sure BigDecimal does not render to string with Scientific Notation
+        value = value.toPlainString()
+    }
+
+    if (value instanceof Boolean)
+    {
+        value = value ? 1:0
+    }
+
+    if (instanceId)
+    {
+        println &#34;${instanceId}.${key}=${value}&#34;
+    }
+    else
+    {
+        println &#34;${key}=${value}&#34;
+    }
+}</value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>windowsscript</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>linuxscript</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>windowscmdline</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        <attribute>
+            <name>linuxcmdline</name>
+            <value></value>
+            <comment></comment>
+        </attribute>
+        </attributes>
+        <datapoints>
+        <datapoint>
+            <name>ActualRpoSeconds</name>
+            <originId>eZfpJuCqTn2-PyPptNsX4w</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.ActualRPO</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The time since the last checkpoint was written to the journal in seconds.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>ThroughputInMB</name>
+            <originId>UdmbKwzBTLqb47xT0h2nHQ</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.ThroughputInMB</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The storage throughput for all the applications running on the VMs being protected in the VPG.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>ConfiguredRpoSeconds</name>
+            <originId>gEpjapyeRp-aglvjIFfcGA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.ConfiguredRpoSeconds</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The configured SLA for the RPO in seconds.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>ActualHistoryMinutes</name>
+            <originId>MD7uc-cdQ9-hJsXoMxD8uA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.ActualHistoryInMinutes</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The oldest checkpoint available to the journal in minutes.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>ProvisionedStorageInMB</name>
+            <originId>kaR0kZu8RYqU8h6CNO20Ww</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.ProvisionedStorageInMB</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The storage provisioned for the VPG in the recovery site.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>ConfiguredHistoryMinutes</name>
+            <originId>X70Yg-MRRb6Fs01SiszJlw</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.ConfiguredHistoryInMinutes</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The configured SLA for the Journal History in minutes.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>Status</name>
+            <originId>bO1-8-V3SCGu0-T_aJ87nQ</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.Status</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The status of the VPG.
+
+Status Codes:
+0=Initializing
+1=MeetingSLA
+2=FailingOver
+3=Moving
+4=Deleting
+5=Recovered
+6=HistoryNotMeetingSLA
+7=RpoNotMeetingSLA
+8=NotMeetingSLA</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>SubStatus</name>
+            <originId>vEChIYWzRGeSfcJp7cdzkQ</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.SubStatus</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The substatus of the VPG:
+
+Status Codes:
+0=None
+1=InitialSync
+2=Creating
+3=VolumeInitialSync
+4=Sync
+5=RecoveryPossible
+6=DeltaSync
+7=NeedsConfiguration
+8=Error
+9=EmptyProtectionGroup
+10=DisconnectedFromPeerNoRecoveryPoints
+11=FullSync
+12=VolumeDeltaSync
+13=VolumeFullSync
+14=FailingOverCommitting
+15=FailingOverBeforeCommit
+16=FailingOverRollingBack
+17=Promoting
+18=MovingCommitting
+19=MovingBeforeCommit
+20=MovingRollingBack
+21=Deleting
+22=PendingRemove
+23=BitmapSync
+24=DisconnectedFromPeer
+25=ReplicationPausedUserInitiated
+26=ReplicationPausedSystemInitiated
+27=RecoveryStorageProfileError
+28=Backup
+29=RollingBack
+30=RecoveryStorageError
+31=JournalStorageError
+32=VmNotProtectedError
+33=JournalOrRecoveryMissingError
+34=AddedVmsInInitialSync
+35=ReplicationPausedForMissingVolume
+36=StoppingFotFailure
+37=RollingBackFailOverLiveFailure
+38=RollingBackMoveFailure
+39=SplitingCommitting
+40=PreparePreseed
+41=JournalVmRestore</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>UsedStorageInMB</name>
+            <originId>Fi4-4s3RSKK6rjW5krlNPw</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.UsedStorageInMB</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The storage used by the VPG in the recovery site.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>JournalSlaAlert_12hrs</name>
+            <originId>rhgL0B_PTD6P3dJJOd3c8w</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(gt(VmsCount, 0), or(eq(Status, 6), eq(Status, 8)), 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody>The Zerto VPG ##INSTANCE## on ##HOST## is failing the configured Journal History SLA. This could mean recovery points expected to be available during disaster recovery have been lost.
+
+This started at ##START##, -- or ##DURATION## ago.</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>Journal History SLA failure, excludes empty VPGs.
+
+0=Within SLA
+1=Failing SLA</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>60</alertTransitionIval>
+            <alertClearTransitionIval>1</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>JournalSlaAlert_4hrs</name>
+            <originId>U5Uj2BUcQz2OB6peePIxvw</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(gt(VmsCount, 0), or(eq(Status, 6), eq(Status, 8)), 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody>The Zerto VPG ##INSTANCE## on ##HOST## is failing the configured Journal History SLA. This could mean recovery points expected to be available during disaster recovery have been lost.
+
+This started at ##START##, -- or ##DURATION## ago.</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>Journal History SLA failure, excludes empty VPGs.
+
+0=Within SLA
+1=Failing SLA</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>20</alertTransitionIval>
+            <alertClearTransitionIval>1</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>JournalSlaAlert_6hrs</name>
+            <originId>m_YWTFjOTCGB2GUF4qoWQQ</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(gt(VmsCount, 0), or(eq(Status, 6), eq(Status, 8)), 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody>The Zerto VPG ##INSTANCE## on ##HOST## is failing the configured Journal History SLA. This could mean recovery points expected to be available during disaster recovery have been lost.
+
+This started at ##START##, -- or ##DURATION## ago.</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>Journal History SLA failure, excludes empty VPGs.
+
+0=Within SLA
+1=Failing SLA</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>30</alertTransitionIval>
+            <alertClearTransitionIval>1</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>RpoSlaAlert_2hrs</name>
+            <originId>HaYa-UNyTsqG4r4CTcpQeA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(gt(VmsCount, 0), or(eq(Status, 7), eq(Status, 8)), 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody>The Zerto VPG ##INSTANCE## on ##HOST## is failing the configured Recovery Point Objective (RPO) SLA. This could mean the VPG is not available for failover during disaster recovery.
+
+This started at ##START##, -- or ##DURATION## ago.</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>RPO SLA failure, excludes empty VPGs.
+
+0=Within SLA
+1=Failing SLA</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>10</alertTransitionIval>
+            <alertClearTransitionIval>1</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>RpoSlaAlert_4hrs</name>
+            <originId>zelWwbd1SRupwRfnAGJvyA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(gt(VmsCount, 0), or(eq(Status, 7), eq(Status, 8)), 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody>The Zerto VPG ##INSTANCE## on ##HOST## is failing the configured Recovery Point Objective (RPO) SLA. This could mean the VPG is not available for failover during disaster recovery.
+
+This started at ##START##, -- or ##DURATION## ago.</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>RPO SLA failure, excludes empty VPGs.
+
+0=Within SLA
+1=Failing SLA</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>20</alertTransitionIval>
+            <alertClearTransitionIval>1</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>RpoSlaAlert_6hrs</name>
+            <originId>vUQHsnzzRTKPbU76KGyDWA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(gt(VmsCount, 0), or(eq(Status, 7), eq(Status, 8)), 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody>The Zerto VPG ##INSTANCE## on ##HOST## is failing the configured Recovery Point Objective (RPO) SLA. This could mean the VPG is not available for failover during disaster recovery.
+
+This started at ##START##, -- or ##DURATION## ago.</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>RPO SLA failure, excludes empty VPGs.
+
+0=Within SLA
+1=Failing SLA</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>30</alertTransitionIval>
+            <alertClearTransitionIval>1</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>ExitCode</name>
+            <originId>9cYdKEGPSfqznNJ18yvjAQ</originId>
+            <dataType>4</dataType>
+            <type>2</type>
+            <postprocessormethod>none</postprocessormethod>
+            <postprocessorparam></postprocessorparam>
+            <usevalue>exitCode</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description></description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>VmsCount</name>
+            <originId>2LZseAg-TViincxIFenWaA</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>namevalue</postprocessormethod>
+            <postprocessorparam>##WILDVALUE##.VmsCount</postprocessorparam>
+            <usevalue>output</usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The number of VMs protected by the VPG.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>JournalDifference</name>
+            <originId>QXySAP1nRtej0BrH_Pv9CQ</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(ge(ConfiguredHistoryMinutes - ActualHistoryMinutes, 0), ConfiguredHistoryMinutes - ActualHistoryMinutes, 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The difference between the configured Journal History and the actual Journal History in minutes.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>RpoDifference</name>
+            <originId>DJZ06VcKQPyvXbByErECew</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(ge(ActualRpoSeconds - ConfiguredRpoSeconds, 0), ActualRpoSeconds - ConfiguredRpoSeconds, 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody></alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>The difference between the configured RPO and the actual RPO in seconds.</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>0</alertTransitionIval>
+            <alertClearTransitionIval>0</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>JournalSlaAlert</name>
+            <originId>X4eO9H0ZQm6LudB89tpvZw</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(gt(VmsCount, 0), or(eq(Status, 6), eq(Status, 8)), 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody>The Zerto VPG ##INSTANCE## on ##HOST## is failing the configured Journal History SLA. This could mean recovery points expected to be available during disaster recovery have been lost.
+
+This started at ##START##, -- or ##DURATION## ago.</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>Journal History SLA failure, excludes empty VPGs.
+
+0=Within SLA
+1=Failing SLA</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>2</alertTransitionIval>
+            <alertClearTransitionIval>1</alertClearTransitionIval>
+        </datapoint>
+        <datapoint>
+            <name>RpoSlaAlert</name>
+            <originId>XfQVg8j9Q1OI8uGHRBA0Ww</originId>
+            <dataType>7</dataType>
+            <type>2</type>
+            <postprocessormethod>expression</postprocessormethod>
+            <postprocessorparam>if(gt(VmsCount, 0), or(eq(Status, 7), eq(Status, 8)), 0)</postprocessorparam>
+            <usevalue></usevalue>
+            <alertexpr></alertexpr>
+            <alertmissing>1</alertmissing>
+            <alertsubject></alertsubject>
+            <alertbody>The Zerto VPG ##INSTANCE## on ##HOST## is failing the configured Recovery Point Objective (RPO) SLA. This could mean the VPG is not available for failover during disaster recovery.
+
+This started at ##START##, -- or ##DURATION## ago.</alertbody>
+            <enableanomalyalertsuppression></enableanomalyalertsuppression>
+            <adadvsettingenabled>false</adadvsettingenabled>
+            <warnadadvsetting></warnadadvsetting>
+            <erroradadvsetting></erroradadvsetting>
+            <criticaladadvsetting></criticaladadvsetting>
+            <description>RPO SLA failure, excludes empty VPGs.
+
+0=Within SLA
+1=Failing SLA</description>
+            <maxvalue></maxvalue>
+            <minvalue></minvalue>
+            <maxdigits>4</maxdigits>
+            <userparam1></userparam1>
+            <userparam2></userparam2>
+            <userparam3></userparam3>
+            <iscomposite>false</iscomposite>
+            <rpn></rpn>
+            <alertTransitionIval>2</alertTransitionIval>
+            <alertClearTransitionIval>1</alertClearTransitionIval>
+        </datapoint>
+        </datapoints>
+        <graphs>
+        <graph>
+            <name>Journal History</name>
+            <title>Journal History</title>
+            <originId></originId>            <verticallabel>hours</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>0.0</minvalue>
+            <displayprio>2</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <graphdatapoints>
+        <graphdatapoint>
+            <name>ActualHistoryInMinutes</name>
+            <datapointname>ActualHistoryMinutes</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+        <graphdatapoint>
+            <name>ConfiguredHistoryInMinutes</name>
+            <datapointname>ConfiguredHistoryMinutes</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+            </graphdatapoints>
+            <graphvirtualdatapoints>
+        <graphvirtualdatapoint>
+            <name>ActualHistoryInHours</name>
+            <rpn>ActualHistoryInMinutes / 60</rpn>
+            <originId></originId>
+        </graphvirtualdatapoint>
+        <graphvirtualdatapoint>
+            <name>ConfiguredHistoryInHours</name>
+            <rpn>ConfiguredHistoryInMinutes / 60</rpn>
+            <originId></originId>
+        </graphvirtualdatapoint>
+            </graphvirtualdatapoints>
+            <graphdatas>
+            <graphdata>
+                <type>1</type>
+                <legend>Configured History in Hours</legend>
+                <color>green</color>
+                <datapointname>ConfiguredHistoryInHours</datapointname>
+                <isvirtualdatapoint>true</isvirtualdatapoint>
+            </graphdata>
+            <graphdata>
+                <type>1</type>
+                <legend>Actual History in Hours</legend>
+                <color>orange</color>
+                <datapointname>ActualHistoryInHours</datapointname>
+                <isvirtualdatapoint>true</isvirtualdatapoint>
+            </graphdata>
+            </graphdatas>
+        </graph>
+        <graph>
+            <name>RPO</name>
+            <title>RPO</title>
+            <originId></originId>            <verticallabel>seconds</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>0.0</minvalue>
+            <displayprio>1</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <graphdatapoints>
+        <graphdatapoint>
+            <name>ActualRpoSeconds</name>
+            <datapointname>ActualRpoSeconds</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+        <graphdatapoint>
+            <name>ConfiguredRpoSeconds</name>
+            <datapointname>ConfiguredRpoSeconds</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+            </graphdatapoints>
+            <graphvirtualdatapoints>
+            </graphvirtualdatapoints>
+            <graphdatas>
+            <graphdata>
+                <type>1</type>
+                <legend>Configured RPO in Seconds</legend>
+                <color>green</color>
+                <datapointname>ConfiguredRpoSeconds</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            <graphdata>
+                <type>1</type>
+                <legend>Actual RPO in Seconds</legend>
+                <color>orange</color>
+                <datapointname>ActualRpoSeconds</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            </graphdatas>
+        </graph>
+        <graph>
+            <name>Status</name>
+            <title>Status</title>
+            <originId></originId>            <verticallabel>status code</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>NaN</minvalue>
+            <displayprio>3</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <graphdatapoints>
+        <graphdatapoint>
+            <name>Status</name>
+            <datapointname>Status</datapointname>
+            <originId></originId>
+            <cf>2</cf>
+        </graphdatapoint>
+        <graphdatapoint>
+            <name>SubStatus</name>
+            <datapointname>SubStatus</datapointname>
+            <originId></originId>
+            <cf>2</cf>
+        </graphdatapoint>
+            </graphdatapoints>
+            <graphvirtualdatapoints>
+            </graphvirtualdatapoints>
+            <graphdatas>
+            <graphdata>
+                <type>1</type>
+                <legend>Status</legend>
+                <color>aqua</color>
+                <datapointname>Status</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            <graphdata>
+                <type>1</type>
+                <legend>Substatus</legend>
+                <color>fuchsia</color>
+                <datapointname>SubStatus</datapointname>
+                <isvirtualdatapoint>false</isvirtualdatapoint>
+            </graphdata>
+            </graphdatas>
+        </graph>
+        <graph>
+            <name>Storage</name>
+            <title>Storage</title>
+            <originId></originId>            <verticallabel>gigabytes</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>0.0</minvalue>
+            <displayprio>4</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <graphdatapoints>
+        <graphdatapoint>
+            <name>ProvisionedStorageInMB</name>
+            <datapointname>ProvisionedStorageInMB</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+        <graphdatapoint>
+            <name>UsedStorageInMB</name>
+            <datapointname>UsedStorageInMB</datapointname>
+            <originId></originId>
+            <cf>1</cf>
+        </graphdatapoint>
+            </graphdatapoints>
+            <graphvirtualdatapoints>
+        <graphvirtualdatapoint>
+            <name>ProvisionedStorageInGB</name>
+            <rpn>ProvisionedStorageInMB / 1024</rpn>
+            <originId></originId>
+        </graphvirtualdatapoint>
+        <graphvirtualdatapoint>
+            <name>UsedStorageInGB</name>
+            <rpn>UsedStorageInMB / 1024</rpn>
+            <originId></originId>
+        </graphvirtualdatapoint>
+            </graphvirtualdatapoints>
+            <graphdatas>
+            <graphdata>
+                <type>2</type>
+                <legend>Provisioned Storage in GB</legend>
+                <color>green</color>
+                <datapointname>ProvisionedStorageInGB</datapointname>
+                <isvirtualdatapoint>true</isvirtualdatapoint>
+            </graphdata>
+            <graphdata>
+                <type>2</type>
+                <legend>Used Storage in GB</legend>
+                <color>orange</color>
+                <datapointname>UsedStorageInGB</datapointname>
+                <isvirtualdatapoint>true</isvirtualdatapoint>
+            </graphdata>
+            </graphdatas>
+        </graph>
+        </graphs>
+        <overviewgraphs>
+        <overviewgraph>
+            <name>Journal Difference</name>
+            <title>Journal Difference From Configured</title>
+            <verticallabel>hours</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>0.0</minvalue>
+            <displayprio>2</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <aggregated>false</aggregated>
+            <originId></originId>
+            <datapoints>
+        <overviewgraphdatapoint>
+            <name>JournalDifference</name>
+            <datapointname>JournalDifference</datapointname>
+            <cf>1</cf>
+            <aggregateMethod>sum</aggregateMethod>
+            <originId></originId>
+        </overviewgraphdatapoint>
+            </datapoints>
+            <virtualdatapoints>
+        <overviewgraphvirtualdatapoint>
+            <name>JournalDifferenceHours</name>
+            <rpn>JournalDifference / 60</rpn>
+            <originId></originId>
+        </overviewgraphvirtualdatapoint>
+            </virtualdatapoints>
+            <lines>
+            <overviewgraphline>
+                <type>1</type>
+                <legend>##INSTANCE##</legend>
+                <datapointname>JournalDifferenceHours</datapointname>
+                <isvirtualdatapoint>true</isvirtualdatapoint>
+                <color>silver</color>
+            </overviewgraphline>
+            </lines>
+        </overviewgraph>
+        <overviewgraph>
+            <name>RPO Difference</name>
+            <title>RPO Difference From Configured</title>
+            <verticallabel>minutes</verticallabel>
+            <rigid>false</rigid>
+            <maxvalue>NaN</maxvalue>
+            <minvalue>0.0</minvalue>
+            <displayprio>1</displayprio>
+            <timescale>1day</timescale>
+            <base1024>false</base1024>
+            <aggregated>false</aggregated>
+            <originId></originId>
+            <datapoints>
+        <overviewgraphdatapoint>
+            <name>RpoDifference</name>
+            <datapointname>RpoDifference</datapointname>
+            <cf>1</cf>
+            <aggregateMethod>sum</aggregateMethod>
+            <originId></originId>
+        </overviewgraphdatapoint>
+            </datapoints>
+            <virtualdatapoints>
+        <overviewgraphvirtualdatapoint>
+            <name>RpoDifferenceMinutes</name>
+            <rpn>RpoDifference / 60</rpn>
+            <originId></originId>
+        </overviewgraphvirtualdatapoint>
+            </virtualdatapoints>
+            <lines>
+            <overviewgraphline>
+                <type>1</type>
+                <legend>##INSTANCE##</legend>
+                <datapointname>RpoDifferenceMinutes</datapointname>
+                <isvirtualdatapoint>true</isvirtualdatapoint>
+                <color>silver</color>
+            </overviewgraphline>
+            </lines>
+        </overviewgraph>
+        </overviewgraphs>
+        <scripts>
+        </scripts>
+    </entry>
+</feed>

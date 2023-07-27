@@ -1,0 +1,299 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<feed  version="1.0" hasPendingRequests="false" >
+  <company></company>
+  <status>200</status>
+  <errmsg>OK</errmsg>
+  <interval>0</interval>
+    <entry type="preeventsource">
+        <version>1690490149</version>
+        <name>Zerto Appliance Alerts</name>
+        <description>Zerto Appliance alerts at Error severity.</description>
+        <group></group>
+        <alertlevel>2</alertlevel>
+        <appliesto>hasCategory(&#34;ZertoAppliance&#34;)</appliesto>
+        <collector>scriptevent</collector>
+        <alertsubjecttemplate></alertsubjecttemplate>
+        <alertbodytemplate>Host: ##HOST##
+Detected: ##START##
+Zerto Alert ID:  ##ZERTO.ALERTTYPE##
+Zerto Entity: ##ZERTO.ENTITYTYPE##
+Zerto Site Type: ##ZERTO.SITETYPE##
+Message: ##MESSAGE##</alertbodytemplate>
+        <alerteffectiveival>60</alerteffectiveival>
+        <clearafterack>false</clearafterack>
+        <suppressduplicates>true</suppressduplicates>
+        <suppressduplicateses>true</suppressduplicateses>
+        <tags></tags>
+        <technology>Device Properties:
+
+zertoappliance.host -- Optional, defaults to the device IP when not set.
+zertoappliance.port -- Optional, defaults to 9669.
+zertoappliance.user -- The user name (in the UPN or NetBIOS form as necessary).
+zertoappliance.pass -- The user password.
+system.categories -- Add &#34;ZertoAppliance&#34;.
+
+Notes:
+
+Requires access to the API endpoint on the ZVM or ZCM appliance. Details of the API are available at https://&#60;your-appliance-ip&#62;:9669/swagger/index.html</technology>
+        <doMapping>true</doMapping>
+        <schemaVersion>3</schemaVersion>
+        <params>
+        <preeventsourceparam>
+            <name>scripttype</name>
+            <value>embed</value>
+            <comment>embed</comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>scriptgroovy</name>
+            <value>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
+
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.time.format.DateTimeFormatter
+import java.time.ZonedDateTime
+import java.time.ZoneId
+import org.apache.http.client.utils.URIBuilder
+
+// core http classes
+import org.apache.http.auth.AuthScope
+import org.apache.http.auth.Credentials
+import org.apache.http.auth.NTCredentials
+import org.apache.http.client.config.*
+import org.apache.http.client.entity.*
+import org.apache.http.client.methods.*
+import org.apache.http.client.ServiceUnavailableRetryStrategy
+import org.apache.http.conn.ssl.NoopHostnameVerifier
+import org.apache.http.conn.ssl.TrustSelfSignedStrategy
+import org.apache.http.entity.*
+import org.apache.http.Header
+import org.apache.http.HttpResponse
+import org.apache.http.impl.client.BasicCredentialsProvider
+import org.apache.http.impl.client.CloseableHttpClient
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.impl.client.HttpClientBuilder
+import org.apache.http.impl.client.StandardHttpRequestRetryHandler
+import org.apache.http.ssl.SSLContextBuilder
+import org.apache.http.util.EntityUtils
+
+// LM properties
+def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
+def propHost = hostProps.get(&#39;zertoappliance.host&#39;) ?: propSystemHost
+def propPort = hostProps.get(&#39;zertoappliance.port&#39;)?.isInteger() ?
+    hostProps.get(&#39;zertoappliance.port&#39;).toInteger() : 9669
+def propUser = hostProps.get(&#39;zertoappliance.user&#39;)
+def propPass = hostProps.get(&#39;zertoappliance.pass&#39;)
+
+def dateFormat = DateTimeFormatter.ofPattern(&#34;yyyy-MM-dd&#39;T&#39;HH:mm:ss.SSSX&#34;)
+def utcNow = ZonedDateTime.now(ZoneId.of(&#39;UTC&#39;))
+def alertStartDate = utcNow.minusMinutes(10).format(dateFormat)
+
+Map severity = [
+    &#39;Warning&#39;: &#39;warn&#39;,
+    &#39;Error&#39;: &#39;error&#39;
+]
+
+try
+{
+    def sessionKey = getSessionKey(propHost, propPort, propUser, propPass)
+
+    if (sessionKey == &#39;&#39;)
+    {
+        println &#39;Error: Invalid session token).&#39;
+        return 2
+    }
+
+    // GET request
+    def mainUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setHost(propHost)
+        .setPort(propPort)
+        .setPath(&#39;/v1/alerts&#39;)
+        .setParameter(&#39;startDate&#39;, alertStartDate)
+
+    def httpGet = new HttpGet(mainUriBuilder.build())
+    httpGet.setHeader(&#39;x-zerto-session&#39;, sessionKey)
+
+    def mainResponse = runRequest(httpGet)
+
+    if (mainResponse.code != 200)
+    {
+        println &#34;Error: Bad response code (${mainResponse.code}).&#34;
+        return 3
+    }
+
+    def jsonSlurper = new JsonSlurper()
+    def alerts = jsonSlurper.parseText(mainResponse.body)
+
+    def events = [&#39;events&#39;: []]
+    alerts.each { alert -&#62;
+        events.events &#60;&#60; [
+            &#39;happenedOn&#39;: alert.TurnedOn,
+            &#39;severity&#39;: severity.getOrDefault(alert.Level, &#39;warn&#39;),
+            &#39;message&#39;: alert.Description,
+            &#39;source&#39;: &#39;ZertoApplianceAlerts&#39;,
+            &#39;zerto.entityType&#39;: alert.Entity,
+            &#39;zerto.alertType&#39;: alert.HelpIdentifier,
+            &#39;zerto.siteType&#39;: alert.Site?.type == &#39;PeerSiteApi&#39; ? &#39;Remote&#39; : &#39;Local&#39;,
+        ]
+    }
+
+    println JsonOutput.toJson(events)
+
+    return 0
+}
+catch (Exception e)
+{
+    println e
+    return 1
+}
+
+String getSessionKey(String host, Integer port, String user, String pass)
+{
+    def sessionKey = &#39;&#39;
+    def base64Auth = &#34;${user}:${pass}&#34;.bytes.encodeBase64().toString()
+
+    def postUriBuilder = new URIBuilder().setScheme(&#39;https&#39;).setHost(host).setPort(port).setPath(&#39;/v1/session/add&#39;)
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader(&#39;Authorization&#39; , &#34;Basic ${base64Auth}&#34;)
+    httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/json&#39;)
+
+    def postData = &#39;{&#34;authenticationMethod&#34;: 1}&#39;
+    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        sessionKey = postResponse.headers.find { it.getName() == &#39;x-zerto-session&#39; }.getValue()
+    }
+
+    return sessionKey
+}
+
+Map runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)
+{
+    if (request instanceof HttpGet != true)
+    {
+        request.setEntity(entity)
+    }
+
+    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion
+    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient
+    def waitPeriod = 0L
+    def serviceRetry = [
+        retryRequest: { response, executionCount, context -&#62;
+            // increase the wait for each try, here we would wait 3, 6 and 9 seconds
+            waitPeriod += 3000L
+            def statusCode = response.getStatusLine().getStatusCode()
+            return executionCount &#60;= 3 &#38;&#38; (statusCode == 429 || statusCode == 500 || statusCode == 503)
+        },
+        getRetryInterval: {
+            return waitPeriod
+        }
+    ] as ServiceUnavailableRetryStrategy
+
+    // create an http client which retries for connection &#34;I/O&#34; errors and for certain http status codes
+    HttpClientBuilder httpClientBuilder = HttpClients.custom()
+        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())
+        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))
+        .setServiceUnavailableRetryStrategy(serviceRetry)
+
+    // allow self-signed certificates
+    httpClientBuilder.setSSLContext(
+        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()
+    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+
+    if (credentials)
+    {
+        // attempt authentication with credentials supported by the BasicCredentialsProvider
+        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()
+        credentialProvider.setCredentials(AuthScope.ANY, credentials)
+        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)
+    }
+
+    CloseableHttpClient httpClient = httpClientBuilder.build()
+    HttpResponse response = httpClient.execute(request)
+    String responseBody = null
+
+    if (response.getEntity())
+    {
+        // only attempt to convert the body to string if there is content
+        responseBody = EntityUtils.toString(response.getEntity())
+    }
+
+    Integer code = response.getStatusLine().getStatusCode()
+    List&#60;Header&#62; headers = response.getAllHeaders()
+
+    def responseMap = [
+        code: code,
+        headers: headers,
+        body: responseBody,
+    ]
+
+    httpClient.close()
+    return responseMap
+}</value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>windowsscript</name>
+            <value></value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>linuxscript</name>
+            <value></value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>windowscmdline</name>
+            <value></value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>linuxcmdline</name>
+            <value></value>
+            <comment></comment>
+        </preeventsourceparam>
+        <preeventsourceparam>
+            <name>schedule</name>
+            <value>600</value>
+            <comment>180</comment>
+        </preeventsourceparam>
+        </params>
+        <filters>
+        <preeventsourcefilter>
+            <name>zerto.siteType</name>
+            <value>Local</value>
+            <comment>Removes duplicate alerts from remote sites where the remote appliance is also monitored.</comment>
+            <op>Equal</op>
+        </preeventsourcefilter>
+        <preeventsourcefilter>
+            <name>zerto.alertType</name>
+            <value>VPG0004</value>
+            <comment>&#34;VPG has low journal history&#34;.  This is covered by the Journal SLA alerts.</comment>
+            <op>NotEqual</op>
+        </preeventsourcefilter>
+        <preeventsourcefilter>
+            <name>zerto.alertType</name>
+            <value>VPG0010</value>
+            <comment>&#34;VPG target RPO exceeded&#34;.  This is covered by the RPO SLA alerts.</comment>
+            <op>NotEqual</op>
+        </preeventsourcefilter>
+        <preeventsourcefilter>
+            <name>zerto.alertType</name>
+            <value>VRA0039</value>
+            <comment>&#34;Journal reached configured limit&#34;. This is covered by the Journal SLA alerts.</comment>
+            <op>NotEqual</op>
+        </preeventsourcefilter>
+        <preeventsourcefilter>
+            <name>Severity</name>
+            <value>error</value>
+            <comment></comment>
+            <op>Equal</op>
+        </preeventsourcefilter>
+        </filters>
+        <scripts>
+        </scripts>
+    </entry>
+</feed>
