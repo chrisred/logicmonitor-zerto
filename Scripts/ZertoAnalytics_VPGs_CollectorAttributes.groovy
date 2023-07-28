@@ -1,3 +1,4 @@
+import com.santaba.agent.util.script.ScriptCache
 import groovy.json.JsonSlurper
 import org.apache.http.client.utils.URIBuilder
 
@@ -23,6 +24,7 @@ import org.apache.http.ssl.SSLContextBuilder
 import org.apache.http.util.EntityUtils
 
 // LM properties
+def propDeviceId = hostProps.get('system.deviceId')
 def propSystemHost = hostProps.get('system.hostname')
 def propHost = hostProps.get('zertoanalytics.host') ?: propSystemHost
 def propUser = hostProps.get('zertoanalytics.user')
@@ -83,7 +85,7 @@ Map vpgSubStatus = [
 
 try
 {
-    def sessionToken = getSessionToken(propHost, propUser, propPass)
+    def sessionToken = getCachedToken(propDeviceId) ?: getSessionToken(propHost, propUser, propPass)
 
     if (sessionToken == '')
     {
@@ -129,6 +131,14 @@ catch (Exception e)
 {
     println e
     return 1
+}
+
+String getCachedToken(String deviceId)
+{
+    def cache = ScriptCache.getCache()
+    def cacheValue = cache.get("ZertoAnalyticsToken${deviceId}")
+
+    return cacheValue ?: ''
 }
 
 String getSessionToken(String host, String user, String pass)

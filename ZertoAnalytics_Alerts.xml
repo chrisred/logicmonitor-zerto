@@ -5,7 +5,7 @@
   <errmsg>OK</errmsg>
   <interval>0</interval>
     <entry type="preeventsource">
-        <version>1690231832</version>
+        <version>1690565100</version>
         <name>Zerto Analytics Alerts</name>
         <description>Zerto Analytics alerts at Error severity.</description>
         <group></group>
@@ -45,7 +45,10 @@ Details of the API should be available at https://docs.api.zerto.com. The curren
         </preeventsourceparam>
         <preeventsourceparam>
             <name>scriptgroovy</name>
-            <value>import groovy.json.JsonOutput
+            <value>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
+
+import com.santaba.agent.util.script.ScriptCache
+import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.time.format.DateTimeFormatter
 import java.time.ZonedDateTime
@@ -74,6 +77,7 @@ import org.apache.http.ssl.SSLContextBuilder
 import org.apache.http.util.EntityUtils
 
 // LM properties
+def propDeviceId = hostProps.get(&#39;system.deviceId&#39;)
 def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
 def propHost = hostProps.get(&#39;zertoanalytics.host&#39;) ?: propSystemHost
 def propUser = hostProps.get(&#39;zertoanalytics.user&#39;)
@@ -91,7 +95,7 @@ Map severity = [
 
 try
 {
-    def sessionToken = getSessionToken(propHost, propUser, propPass)
+    def sessionToken = getCachedToken(propDeviceId) ?: getSessionToken(propHost, propUser, propPass)
 
     if (sessionToken == &#39;&#39;)
     {
@@ -145,6 +149,14 @@ catch (Exception e)
 {
     println e
     return 1
+}
+
+String getCachedToken(String deviceId)
+{
+    def cache = ScriptCache.getCache()
+    def cacheValue = cache.get(&#34;ZertoAnalyticsToken${deviceId}&#34;)
+
+    return cacheValue ?: &#39;&#39;
 }
 
 String getSessionToken(String host, String user, String pass)
