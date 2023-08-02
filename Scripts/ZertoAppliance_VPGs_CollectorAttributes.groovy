@@ -83,7 +83,7 @@ try
         output('ThroughputInMB', vpg.ThroughputInMB, wildValue)
         output('ActualRPO', vpg.ActualRPO, wildValue)
         output('ConfiguredRpoSeconds', vpg.ConfiguredRpoSeconds, wildValue)
-        output('Status', vpgStatus.get(vpg.Status, -1), wildValue)
+        output('Status', vpgStatus.getOrDefault(vpg.Status, -1), wildValue)
         output('SubStatus', vpg.SubStatus, wildValue)
         output('ActualHistoryInMinutes', vpg.HistoryStatusApi.ActualHistoryInMinutes, wildValue)
         output('ConfiguredHistoryInMinutes', vpg.HistoryStatusApi.ConfiguredHistoryInMinutes, wildValue)
