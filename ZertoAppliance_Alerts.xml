@@ -5,7 +5,7 @@
   <errmsg>OK</errmsg>
   <interval>0</interval>
     <entry type="preeventsource">
-        <version>1690490149</version>
+        <version>1691016546</version>
         <name>Zerto Appliance Alerts</name>
         <description>Zerto Appliance alerts at Error severity.</description>
         <group></group>
@@ -47,6 +47,7 @@ Requires access to the API endpoint on the ZVM or ZCM appliance. Details of the 
             <name>scriptgroovy</name>
             <value>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
 
+import com.santaba.agent.util.script.ScriptCache
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.time.format.DateTimeFormatter
@@ -76,6 +77,7 @@ import org.apache.http.ssl.SSLContextBuilder
 import org.apache.http.util.EntityUtils
 
 // LM properties
+def propDeviceId = hostProps.get(&#39;system.deviceId&#39;)
 def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
 def propHost = hostProps.get(&#39;zertoappliance.host&#39;) ?: propSystemHost
 def propPort = hostProps.get(&#39;zertoappliance.port&#39;)?.isInteger() ?
@@ -94,7 +96,7 @@ Map severity = [
 
 try
 {
-    def sessionKey = getSessionKey(propHost, propPort, propUser, propPass)
+    def sessionKey = getCachedToken(propDeviceId) ?: getSessionKey(propHost, propPort, propUser, propPass)
 
     if (sessionKey == &#39;&#39;)
     {
@@ -145,6 +147,14 @@ catch (Exception e)
 {
     println e
     return 1
+}
+
+String getCachedToken(String deviceId)
+{
+    def cache = ScriptCache.getCache()
+    def cacheValue = cache.get(&#34;ZertoApplianceToken${deviceId}&#34;)
+
+    return cacheValue ?: &#39;&#39;
 }
 
 String getSessionKey(String host, Integer port, String user, String pass)

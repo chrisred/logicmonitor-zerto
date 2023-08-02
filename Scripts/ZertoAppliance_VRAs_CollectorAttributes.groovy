@@ -1,3 +1,4 @@
+import com.santaba.agent.util.script.ScriptCache
 import groovy.json.JsonSlurper
 import org.apache.http.client.utils.URIBuilder
 
@@ -23,6 +24,7 @@ import org.apache.http.ssl.SSLContextBuilder
 import org.apache.http.util.EntityUtils
 
 // LM properties
+def propDeviceId = hostProps.get('system.deviceId')
 def propSystemHost = hostProps.get('system.hostname')
 def propHost = hostProps.get('zertoappliance.host') ?: propSystemHost
 def propPort = hostProps.get('zertoappliance.port')?.isInteger() ?
@@ -32,7 +34,7 @@ def propPass = hostProps.get('zertoappliance.pass')
 
 try
 {
-    def sessionKey = getSessionKey(propHost, propPort, propUser, propPass)
+    def sessionKey = getCachedToken(propDeviceId) ?: getSessionKey(propHost, propPort, propUser, propPass)
 
     if (sessionKey == '')
     {
@@ -81,6 +83,14 @@ catch (Exception e)
 {
     println e
     return 1
+}
+
+String getCachedToken(String deviceId)
+{
+    def cache = ScriptCache.getCache()
+    def cacheValue = cache.get("ZertoApplianceToken${deviceId}")
+
+    return cacheValue ?: ''
 }
 
 String getSessionKey(String host, Integer port, String user, String pass)
