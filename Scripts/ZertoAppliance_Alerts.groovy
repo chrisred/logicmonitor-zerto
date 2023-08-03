@@ -36,7 +36,7 @@ def propPort = hostProps.get('zertoappliance.port')?.isInteger() ?
 def propUser = hostProps.get('zertoappliance.user')
 def propPass = hostProps.get('zertoappliance.pass')
 
-def dateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSX")
+def dateFormat = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss')
 def utcNow = ZonedDateTime.now(ZoneId.of('UTC'))
 def alertStartDate = utcNow.minusMinutes(10).format(dateFormat)
 
