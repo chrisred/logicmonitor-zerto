@@ -5,14 +5,14 @@
   <errmsg>OK</errmsg>
   <interval>0</interval>
     <entry type="predatasource">
-        <version>1691016482</version>
+        <version>1691596333</version>
         <name>ZertoAppliance_PeerSites</name>
         <displayedas>Zerto Appliance Peer Sites</displayedas>
         <description>Peer site pairing status and metrics.</description>
         <collector>batchscript</collector>
         <hasMultiInstances>true</hasMultiInstances>
         <useWildValueAsUniqueIdentifier>true</useWildValueAsUniqueIdentifier>
-        <schedule>360</schedule>
+        <schedule>180</schedule>
         <appliesTo>hasCategory(&#34;ZertoAppliance&#34;)</appliesTo>
         <wildcardauto>true</wildcardauto>
         <wildcardpersist>false</wildcardpersist>
