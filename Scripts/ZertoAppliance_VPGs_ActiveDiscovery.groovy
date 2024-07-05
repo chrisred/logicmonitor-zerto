@@ -1,6 +1,7 @@
 import com.santaba.agent.util.script.ScriptCache
 import groovy.json.JsonSlurper
 import org.apache.http.client.utils.URIBuilder
+import org.apache.http.message.BasicNameValuePair
 
 // core http classes
 import org.apache.http.auth.AuthScope
@@ -28,18 +29,34 @@ def propDeviceId = hostProps.get('system.deviceId')
 def propSystemHost = hostProps.get('system.hostname')
 def propHost = hostProps.get('zertoappliance.host') ?: propSystemHost
 def propPort = hostProps.get('zertoappliance.port')?.isInteger() ?
-    hostProps.get('zertoappliance.port').toInteger() : 9669
+    hostProps.get('zertoappliance.port').toInteger() : 443
 def propUser = hostProps.get('zertoappliance.user')
 def propPass = hostProps.get('zertoappliance.pass')
+def propClientId = hostProps.get('zertoappliance.api.id')
+def propClientSecret = hostProps.get('zertoappliance.api.key')
+def propApplianceType = hostProps.get('zertoappliance.type')
 
 try
 {
-    def sessionKey = getCachedToken(propDeviceId) ?: getSessionKey(propHost, propPort, propUser, propPass)
+    def token = getCachedToken(propDeviceId)
+    def applianceType = getApplianceType(propPort, propApplianceType)
 
-    if (sessionKey == '')
+    if (token == '')
     {
-        println 'Error: Invalid session key.'
-        return 2
+        if (applianceType == 'linux')
+        {
+            token = getLinuxToken(propHost, propPort, propClientId, propClientSecret)
+        }
+        else
+        {
+            token = getWindowsToken(propHost, propPort, propUser, propPass)
+        }
+
+        if (token == '')
+        {
+            println 'Error: Invalid session token.'
+            return 2
+        }
     }
 
     // GET request
@@ -50,7 +67,15 @@ try
         .setPath('/v1/vpgs')
 
     def httpGet = new HttpGet(mainUriBuilder.build())
-    httpGet.setHeader('x-zerto-session', sessionKey)
+
+    if (applianceType == 'linux')
+    {
+        httpGet.setHeader('Authorization', "Bearer ${token}")
+    }
+    else
+    {
+        httpGet.setHeader('x-zerto-session', token)
+    }
 
     def mainResponse = runRequest(httpGet)
 
@@ -100,12 +125,57 @@ String getCachedToken(String deviceId)
     return cacheValue ?: ''
 }
 
-String getSessionKey(String host, Integer port, String user, String pass)
+String getApplianceType(Integer port, String applianceType)
+{
+    if (applianceType == 'linux') { return 'linux' }
+    else if (applianceType == 'windows') { return 'windows' }
+    else if (port == 443) { return 'linux' }
+    else { return 'windows' }
+}
+
+String getLinuxToken(String host, Integer port, String clientId, String clientSecret)
+{
+    def accessToken = ''
+
+    def postUriBuilder = new URIBuilder()
+        .setScheme('https')
+        .setPort(port)
+        .setHost(host)
+        .setPath('/auth/realms/zerto/protocol/openid-connect/token')
+
+    def postData = []
+    postData.add(new BasicNameValuePair('grant_type', 'client_credentials'))
+    postData.add(new BasicNameValuePair('client_id', clientId))
+    postData.add(new BasicNameValuePair('client_secret', clientSecret))
+    def postEntity = new UrlEncodedFormEntity(postData)
+
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader('Accept', 'application/json')
+    httpPost.setHeader('Content-Type', 'application/x-www-form-urlencoded')
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        def jsonSlurper = new JsonSlurper()
+        def jsonResponse = jsonSlurper.parseText(postResponse.body)
+        accessToken = jsonResponse.access_token
+    }
+
+    return accessToken
+}
+
+String getWindowsToken(String host, Integer port, String user, String pass)
 {
     def sessionKey = ''
     def base64Auth = "${user}:${pass}".bytes.encodeBase64().toString()
 
-    def postUriBuilder = new URIBuilder().setScheme('https').setHost(host).setPort(port).setPath('/v1/session/add')
+    def postUriBuilder = new URIBuilder()
+        .setScheme('https')
+        .setHost(host)
+        .setPort(port)
+        .setPath('/v1/session/add')
+
     def httpPost = new HttpPost(postUriBuilder.build())
     httpPost.setHeader('Authorization' , "Basic ${base64Auth}")
     httpPost.setHeader('Content-Type', 'application/json')
