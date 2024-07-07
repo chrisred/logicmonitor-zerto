@@ -4,8 +4,9 @@
   <status>200</status>
   <errmsg>OK</errmsg>
   <interval>0</interval>
+  <isCollectorPublisherEnabled>false</isCollectorPublisherEnabled>
     <entry type="predatasource">
-        <version>1691016467</version>
+        <version>1720359932</version>
         <name>ZertoAppliance_Datastores</name>
         <displayedas>Zerto Appliance Datastores</displayedas>
         <description>Datastore usage and availability.</description>
@@ -20,11 +21,12 @@
         <wildcardlinuxcmdline>type=&#34;embeded&#34; </wildcardlinuxcmdline>
         <wildcardwinscript>ad_script</wildcardwinscript>
         <wildcardwincmdline>type=&#34;embeded&#34; </wildcardwincmdline>
-        <wildcardgroovyscript>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
+        <wildcardgroovyscript>// Copyright (c) 2024 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
 
 import com.santaba.agent.util.script.ScriptCache
 import groovy.json.JsonSlurper
 import org.apache.http.client.utils.URIBuilder
+import org.apache.http.message.BasicNameValuePair
 import java.security.MessageDigest
 
 // core http classes
@@ -53,18 +55,34 @@ def propDeviceId = hostProps.get(&#39;system.deviceId&#39;)
 def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
 def propHost = hostProps.get(&#39;zertoappliance.host&#39;) ?: propSystemHost
 def propPort = hostProps.get(&#39;zertoappliance.port&#39;)?.isInteger() ?
-    hostProps.get(&#39;zertoappliance.port&#39;).toInteger() : 9669
+    hostProps.get(&#39;zertoappliance.port&#39;).toInteger() : 443
 def propUser = hostProps.get(&#39;zertoappliance.user&#39;)
 def propPass = hostProps.get(&#39;zertoappliance.pass&#39;)
+def propClientId = hostProps.get(&#39;zertoappliance.api.id&#39;)
+def propClientSecret = hostProps.get(&#39;zertoappliance.api.key&#39;)
+def propApplianceType = hostProps.get(&#39;zertoappliance.type&#39;)
 
 try
 {
-    def sessionKey = getCachedToken(propDeviceId) ?: getSessionKey(propHost, propPort, propUser, propPass)
+    def token = getCachedToken(propDeviceId)
+    def applianceType = getApplianceType(propPort, propApplianceType)
 
-    if (sessionKey == &#39;&#39;)
+    if (token == &#39;&#39;)
     {
-        println &#39;Error: Invalid session key.&#39;
-        return 2
+        if (applianceType == &#39;linux&#39;)
+        {
+            token = getLinuxToken(propHost, propPort, propClientId, propClientSecret)
+        }
+        else
+        {
+            token = getWindowsToken(propHost, propPort, propUser, propPass)
+        }
+
+        if (token == &#39;&#39;)
+        {
+            println &#39;Error: Invalid session token.&#39;
+            return 2
+        }
     }
 
     // datastores GET request
@@ -75,7 +93,15 @@ try
         .setPath(&#39;/v1/datastores&#39;)
 
     def httpGet = new HttpGet(mainUriBuilder.build())
-    httpGet.setHeader(&#39;x-zerto-session&#39;, sessionKey)
+
+    if (applianceType == &#39;linux&#39;)
+    {
+        httpGet.setHeader(&#39;Authorization&#39;, &#34;Bearer ${token}&#34;)
+    }
+    else
+    {
+        httpGet.setHeader(&#39;x-zerto-session&#39;, token)
+    }
 
     def mainResponse = runRequest(httpGet)
 
@@ -126,12 +152,57 @@ String getCachedToken(String deviceId)
     return cacheValue ?: &#39;&#39;
 }
 
-String getSessionKey(String host, Integer port, String user, String pass)
+String getApplianceType(Integer port, String applianceType)
+{
+    if (applianceType == &#39;linux&#39;) { return &#39;linux&#39; }
+    else if (applianceType == &#39;windows&#39;) { return &#39;windows&#39; }
+    else if (port == 443) { return &#39;linux&#39; }
+    else { return &#39;windows&#39; }
+}
+
+String getLinuxToken(String host, Integer port, String clientId, String clientSecret)
+{
+    def accessToken = &#39;&#39;
+
+    def postUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setPort(port)
+        .setHost(host)
+        .setPath(&#39;/auth/realms/zerto/protocol/openid-connect/token&#39;)
+
+    def postData = []
+    postData.add(new BasicNameValuePair(&#39;grant_type&#39;, &#39;client_credentials&#39;))
+    postData.add(new BasicNameValuePair(&#39;client_id&#39;, clientId))
+    postData.add(new BasicNameValuePair(&#39;client_secret&#39;, clientSecret))
+    def postEntity = new UrlEncodedFormEntity(postData)
+
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader(&#39;Accept&#39;, &#39;application/json&#39;)
+    httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/x-www-form-urlencoded&#39;)
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        def jsonSlurper = new JsonSlurper()
+        def jsonResponse = jsonSlurper.parseText(postResponse.body)
+        accessToken = jsonResponse.access_token
+    }
+
+    return accessToken
+}
+
+String getWindowsToken(String host, Integer port, String user, String pass)
 {
     def sessionKey = &#39;&#39;
     def base64Auth = &#34;${user}:${pass}&#34;.bytes.encodeBase64().toString()
 
-    def postUriBuilder = new URIBuilder().setScheme(&#39;https&#39;).setHost(host).setPort(port).setPath(&#39;/v1/session/add&#39;)
+    def postUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setHost(host)
+        .setPort(port)
+        .setPath(&#39;/v1/session/add&#39;)
+
     def httpPost = new HttpPost(postUriBuilder.build())
     httpPost.setHeader(&#39;Authorization&#39; , &#34;Basic ${base64Auth}&#34;)
     httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/json&#39;)
@@ -223,19 +294,22 @@ Map runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHt
         <technology>Device Properties:
 
 zertoappliance.host -- Optional, defaults to the device IP when not set.
-zertoappliance.port -- Optional, defaults to 9669.
-zertoappliance.user -- The user name (in the UPN or NetBIOS form as necessary).
-zertoappliance.pass -- The user password.
+zertoappliance.port -- Optional, defaults to 443 (Linux), set 9669 for Windows appliances.
+zertoappliance.user -- The user name (in the UPN or NetBIOS form as necessary), used with the Windows appliance.
+zertoappliance.pass -- The user password, used with the Windows appliance.
+zertoappliance.api.id -- The client ID, used with the Linux appliance.
+zertoappliance.api.key -- The client secret, used with the Linux appliance.
+zertoappliance.type -- Optional, forces the appliance type if required, set either &#34;windows&#34; or &#34;linux&#34;.
 system.categories -- Add &#34;ZertoAppliance&#34;.
 
 Notes:
 
-Requires access to the API endpoint on the ZVM or ZCM appliance. Details of the API are available at https://&#60;your-appliance-ip&#62;:9669/swagger/index.html
+Requires access to the API endpoint on the ZVM or ZCM appliance. See the &#34;ZertoAppliance_Token&#34; DataSource for details.
 
 This DataSource is not applicable when using a Zerto Cloud Manager (ZCM).
 
 Datapoints with the suffix &#34;Alert&#34; will only alert where a datastore has recovery or journal data present. Zerto Appliances show all datastores that are present in the environment being protected/recovered to, not all are relevant to Zerto replication.</technology>
-        <adlist><![CDATA[{"agdmethod":"none","method":"ad_script","agdparams":"","id":0,"filters":[],"params":{"type":"embeded","groovyscript":"// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto\n\nimport com.santaba.agent.util.script.ScriptCache\nimport groovy.json.JsonSlurper\nimport org.apache.http.client.utils.URIBuilder\nimport java.security.MessageDigest\n\n// core http classes\nimport org.apache.http.auth.AuthScope\nimport org.apache.http.auth.Credentials\nimport org.apache.http.auth.NTCredentials\nimport org.apache.http.client.config.*\nimport org.apache.http.client.entity.*\nimport org.apache.http.client.methods.*\nimport org.apache.http.client.ServiceUnavailableRetryStrategy\nimport org.apache.http.conn.ssl.NoopHostnameVerifier\nimport org.apache.http.conn.ssl.TrustSelfSignedStrategy\nimport org.apache.http.entity.*\nimport org.apache.http.Header\nimport org.apache.http.HttpResponse\nimport org.apache.http.impl.client.BasicCredentialsProvider\nimport org.apache.http.impl.client.CloseableHttpClient\nimport org.apache.http.impl.client.HttpClients\nimport org.apache.http.impl.client.HttpClientBuilder\nimport org.apache.http.impl.client.StandardHttpRequestRetryHandler\nimport org.apache.http.ssl.SSLContextBuilder\nimport org.apache.http.util.EntityUtils\n\n// LM properties\ndef propDeviceId = hostProps.get('system.deviceId')\ndef propSystemHost = hostProps.get('system.hostname')\ndef propHost = hostProps.get('zertoappliance.host') ?: propSystemHost\ndef propPort = hostProps.get('zertoappliance.port')?.isInteger() ?\n    hostProps.get('zertoappliance.port').toInteger() : 9669\ndef propUser = hostProps.get('zertoappliance.user')\ndef propPass = hostProps.get('zertoappliance.pass')\n\ntry\n{\n    def sessionKey = getCachedToken(propDeviceId) ?: getSessionKey(propHost, propPort, propUser, propPass)\n\n    if (sessionKey == '')\n    {\n        println 'Error: Invalid session key.'\n        return 2\n    }\n\n    // datastores GET request\n    def mainUriBuilder = new URIBuilder()\n        .setScheme('https')\n        .setHost(propHost)\n        .setPort(propPort)\n        .setPath('/v1/datastores')\n\n    def httpGet = new HttpGet(mainUriBuilder.build())\n    httpGet.setHeader('x-zerto-session', sessionKey)\n\n    def mainResponse = runRequest(httpGet)\n\n    if (mainResponse.code != 200)\n    {\n        println \"Error: Bad response code (${mainResponse.code}).\"\n        return 3\n    }\n\n    def jsonSlurper = new JsonSlurper()\n    def jsonResponse = jsonSlurper.parseText(mainResponse.body)\n\n    jsonResponse.each { datastore ->\n        // clean up the datastore ID\n        def hashInput = datastore.DatastoreIdentifier\n        MessageDigest digest = MessageDigest.getInstance('MD5')\n        digest.update(hashInput.bytes)\n\n        def wildValue = digest.digest().encodeHex().toString()\n        def wildAlias = datastore.DatastoreName\n\n        def instanceProperties = [\n            //none\n        ]\n\n        // Encode the instance property strings to escape any HTTP/URL special characters, the wild value/alias strings\n        // appear to be encoded by LogicMontor automatically.\n        instanceProperyStrings = instanceProperties.collect { property, value ->\n            URLEncoder.encode(property, 'UTF-8') + '=' + URLEncoder.encode(value.toString(), 'UTF-8')\n        }\n\n        println \"${wildValue}##${wildAlias}######${instanceProperyStrings.join('&')}\"\n    }\n\n    return 0\n}\ncatch (Exception e)\n{\n    println e\n    return 1\n}\n\nString getCachedToken(String deviceId)\n{\n    def cache = ScriptCache.getCache()\n    def cacheValue = cache.get(\"ZertoApplianceToken${deviceId}\")\n\n    return cacheValue ?: ''\n}\n\nString getSessionKey(String host, Integer port, String user, String pass)\n{\n    def sessionKey = ''\n    def base64Auth = \"${user}:${pass}\".bytes.encodeBase64().toString()\n\n    def postUriBuilder = new URIBuilder().setScheme('https').setHost(host).setPort(port).setPath('/v1/session/add')\n    def httpPost = new HttpPost(postUriBuilder.build())\n    httpPost.setHeader('Authorization' , \"Basic ${base64Auth}\")\n    httpPost.setHeader('Content-Type', 'application/json')\n\n    def postData = '{\"authenticationMethod\": 1}'\n    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)\n\n    def postResponse = runRequest(httpPost, null, postEntity)\n\n    if (postResponse.code == 200)\n    {\n        sessionKey = postResponse.headers.find { it.getName() == 'x-zerto-session' }.getValue()\n    }\n\n    return sessionKey\n}\n\nMap runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)\n{\n    if (request instanceof HttpGet != true)\n    {\n        request.setEntity(entity)\n    }\n\n    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion\n    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient\n    def waitPeriod = 0L\n    def serviceRetry = [\n        retryRequest: { response, executionCount, context ->\n            // increase the wait for each try, here we would wait 3, 6 and 9 seconds\n            waitPeriod += 3000L\n            def statusCode = response.getStatusLine().getStatusCode()\n            return executionCount <= 3 && (statusCode == 429 || statusCode == 500 || statusCode == 503)\n        },\n        getRetryInterval: {\n            return waitPeriod\n        }\n    ] as ServiceUnavailableRetryStrategy\n\n    // create an http client which retries for connection \"I/O\" errors and for certain http status codes\n    HttpClientBuilder httpClientBuilder = HttpClients.custom()\n        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())\n        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))\n        .setServiceUnavailableRetryStrategy(serviceRetry)\n\n    // allow self-signed certificates\n    httpClientBuilder.setSSLContext(\n        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()\n    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)\n\n    if (credentials)\n    {\n        // attempt authentication with credentials supported by the BasicCredentialsProvider\n        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()\n        credentialProvider.setCredentials(AuthScope.ANY, credentials)\n        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)\n    }\n\n    CloseableHttpClient httpClient = httpClientBuilder.build()\n    HttpResponse response = httpClient.execute(request)\n    String responseBody = null\n\n    if (response.getEntity())\n    {\n        // only attempt to convert the body to string if there is content\n        responseBody = EntityUtils.toString(response.getEntity())\n    }\n\n    Integer code = response.getStatusLine().getStatusCode()\n    List<Header> headers = response.getAllHeaders()\n\n    def responseMap = [\n        code: code,\n        headers: headers,\n        body: responseBody,\n    ]\n\n    httpClient.close()\n    return responseMap\n}\n"}}]]></adlist>
+        <adlist><![CDATA[{"agdmethod":"none","method":"ad_script","agdparams":"","id":0,"filters":[],"params":{"type":"embeded","groovyscript":"// Copyright (c) 2024 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto\n\nimport com.santaba.agent.util.script.ScriptCache\nimport groovy.json.JsonSlurper\nimport org.apache.http.client.utils.URIBuilder\nimport org.apache.http.message.BasicNameValuePair\nimport java.security.MessageDigest\n\n// core http classes\nimport org.apache.http.auth.AuthScope\nimport org.apache.http.auth.Credentials\nimport org.apache.http.auth.NTCredentials\nimport org.apache.http.client.config.*\nimport org.apache.http.client.entity.*\nimport org.apache.http.client.methods.*\nimport org.apache.http.client.ServiceUnavailableRetryStrategy\nimport org.apache.http.conn.ssl.NoopHostnameVerifier\nimport org.apache.http.conn.ssl.TrustSelfSignedStrategy\nimport org.apache.http.entity.*\nimport org.apache.http.Header\nimport org.apache.http.HttpResponse\nimport org.apache.http.impl.client.BasicCredentialsProvider\nimport org.apache.http.impl.client.CloseableHttpClient\nimport org.apache.http.impl.client.HttpClients\nimport org.apache.http.impl.client.HttpClientBuilder\nimport org.apache.http.impl.client.StandardHttpRequestRetryHandler\nimport org.apache.http.ssl.SSLContextBuilder\nimport org.apache.http.util.EntityUtils\n\n// LM properties\ndef propDeviceId = hostProps.get('system.deviceId')\ndef propSystemHost = hostProps.get('system.hostname')\ndef propHost = hostProps.get('zertoappliance.host') ?: propSystemHost\ndef propPort = hostProps.get('zertoappliance.port')?.isInteger() ?\n    hostProps.get('zertoappliance.port').toInteger() : 443\ndef propUser = hostProps.get('zertoappliance.user')\ndef propPass = hostProps.get('zertoappliance.pass')\ndef propClientId = hostProps.get('zertoappliance.api.id')\ndef propClientSecret = hostProps.get('zertoappliance.api.key')\ndef propApplianceType = hostProps.get('zertoappliance.type')\n\ntry\n{\n    def token = getCachedToken(propDeviceId)\n    def applianceType = getApplianceType(propPort, propApplianceType)\n\n    if (token == '')\n    {\n        if (applianceType == 'linux')\n        {\n            token = getLinuxToken(propHost, propPort, propClientId, propClientSecret)\n        }\n        else\n        {\n            token = getWindowsToken(propHost, propPort, propUser, propPass)\n        }\n\n        if (token == '')\n        {\n            println 'Error: Invalid session token.'\n            return 2\n        }\n    }\n\n    // datastores GET request\n    def mainUriBuilder = new URIBuilder()\n        .setScheme('https')\n        .setHost(propHost)\n        .setPort(propPort)\n        .setPath('/v1/datastores')\n\n    def httpGet = new HttpGet(mainUriBuilder.build())\n\n    if (applianceType == 'linux')\n    {\n        httpGet.setHeader('Authorization', \"Bearer ${token}\")\n    }\n    else\n    {\n        httpGet.setHeader('x-zerto-session', token)\n    }\n\n    def mainResponse = runRequest(httpGet)\n\n    if (mainResponse.code != 200)\n    {\n        println \"Error: Bad response code (${mainResponse.code}).\"\n        return 3\n    }\n\n    def jsonSlurper = new JsonSlurper()\n    def jsonResponse = jsonSlurper.parseText(mainResponse.body)\n\n    jsonResponse.each { datastore ->\n        // clean up the datastore ID\n        def hashInput = datastore.DatastoreIdentifier\n        MessageDigest digest = MessageDigest.getInstance('MD5')\n        digest.update(hashInput.bytes)\n\n        def wildValue = digest.digest().encodeHex().toString()\n        def wildAlias = datastore.DatastoreName\n\n        def instanceProperties = [\n            //none\n        ]\n\n        // Encode the instance property strings to escape any HTTP/URL special characters, the wild value/alias strings\n        // appear to be encoded by LogicMontor automatically.\n        instanceProperyStrings = instanceProperties.collect { property, value ->\n            URLEncoder.encode(property, 'UTF-8') + '=' + URLEncoder.encode(value.toString(), 'UTF-8')\n        }\n\n        println \"${wildValue}##${wildAlias}######${instanceProperyStrings.join('&')}\"\n    }\n\n    return 0\n}\ncatch (Exception e)\n{\n    println e\n    return 1\n}\n\nString getCachedToken(String deviceId)\n{\n    def cache = ScriptCache.getCache()\n    def cacheValue = cache.get(\"ZertoApplianceToken${deviceId}\")\n\n    return cacheValue ?: ''\n}\n\nString getApplianceType(Integer port, String applianceType)\n{\n    if (applianceType == 'linux') { return 'linux' }\n    else if (applianceType == 'windows') { return 'windows' }\n    else if (port == 443) { return 'linux' }\n    else { return 'windows' }\n}\n\nString getLinuxToken(String host, Integer port, String clientId, String clientSecret)\n{\n    def accessToken = ''\n\n    def postUriBuilder = new URIBuilder()\n        .setScheme('https')\n        .setPort(port)\n        .setHost(host)\n        .setPath('/auth/realms/zerto/protocol/openid-connect/token')\n\n    def postData = []\n    postData.add(new BasicNameValuePair('grant_type', 'client_credentials'))\n    postData.add(new BasicNameValuePair('client_id', clientId))\n    postData.add(new BasicNameValuePair('client_secret', clientSecret))\n    def postEntity = new UrlEncodedFormEntity(postData)\n\n    def httpPost = new HttpPost(postUriBuilder.build())\n    httpPost.setHeader('Accept', 'application/json')\n    httpPost.setHeader('Content-Type', 'application/x-www-form-urlencoded')\n\n    def postResponse = runRequest(httpPost, null, postEntity)\n\n    if (postResponse.code == 200)\n    {\n        def jsonSlurper = new JsonSlurper()\n        def jsonResponse = jsonSlurper.parseText(postResponse.body)\n        accessToken = jsonResponse.access_token\n    }\n\n    return accessToken\n}\n\nString getWindowsToken(String host, Integer port, String user, String pass)\n{\n    def sessionKey = ''\n    def base64Auth = \"${user}:${pass}\".bytes.encodeBase64().toString()\n\n    def postUriBuilder = new URIBuilder()\n        .setScheme('https')\n        .setHost(host)\n        .setPort(port)\n        .setPath('/v1/session/add')\n\n    def httpPost = new HttpPost(postUriBuilder.build())\n    httpPost.setHeader('Authorization' , \"Basic ${base64Auth}\")\n    httpPost.setHeader('Content-Type', 'application/json')\n\n    def postData = '{\"authenticationMethod\": 1}'\n    def postEntity = new StringEntity(postData, ContentType.APPLICATION_JSON)\n\n    def postResponse = runRequest(httpPost, null, postEntity)\n\n    if (postResponse.code == 200)\n    {\n        sessionKey = postResponse.headers.find { it.getName() == 'x-zerto-session' }.getValue()\n    }\n\n    return sessionKey\n}\n\nMap runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHttpEntity entity=null)\n{\n    if (request instanceof HttpGet != true)\n    {\n        request.setEntity(entity)\n    }\n\n    // http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/#_map_to_type_coercion\n    // https://stackoverflow.com/questions/48541329/timeout-between-request-retries-apache-httpclient\n    def waitPeriod = 0L\n    def serviceRetry = [\n        retryRequest: { response, executionCount, context ->\n            // increase the wait for each try, here we would wait 3, 6 and 9 seconds\n            waitPeriod += 3000L\n            def statusCode = response.getStatusLine().getStatusCode()\n            return executionCount <= 3 && (statusCode == 429 || statusCode == 500 || statusCode == 503)\n        },\n        getRetryInterval: {\n            return waitPeriod\n        }\n    ] as ServiceUnavailableRetryStrategy\n\n    // create an http client which retries for connection \"I/O\" errors and for certain http status codes\n    HttpClientBuilder httpClientBuilder = HttpClients.custom()\n        .setDefaultRequestConfig(RequestConfig.custom().setCookieSpec(CookieSpecs.STANDARD).build())\n        .setRetryHandler(new StandardHttpRequestRetryHandler(3, false))\n        .setServiceUnavailableRetryStrategy(serviceRetry)\n\n    // allow self-signed certificates\n    httpClientBuilder.setSSLContext(\n        new SSLContextBuilder().loadTrustMaterial(null, TrustSelfSignedStrategy.INSTANCE).build()\n    ).setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)\n\n    if (credentials)\n    {\n        // attempt authentication with credentials supported by the BasicCredentialsProvider\n        BasicCredentialsProvider credentialProvider = new BasicCredentialsProvider()\n        credentialProvider.setCredentials(AuthScope.ANY, credentials)\n        httpClientBuilder.setDefaultCredentialsProvider(credentialProvider)\n    }\n\n    CloseableHttpClient httpClient = httpClientBuilder.build()\n    HttpResponse response = httpClient.execute(request)\n    String responseBody = null\n\n    if (response.getEntity())\n    {\n        // only attempt to convert the body to string if there is content\n        responseBody = EntityUtils.toString(response.getEntity())\n    }\n\n    Integer code = response.getStatusLine().getStatusCode()\n    List<Header> headers = response.getAllHeaders()\n\n    def responseMap = [\n        code: code,\n        headers: headers,\n        body: responseBody,\n    ]\n\n    httpClient.close()\n    return responseMap\n}\n"}}]]></adlist>
         <schemaVersion>2</schemaVersion>
         <dataSourceType>1</dataSourceType>
         <attributes>
@@ -246,11 +320,12 @@ Datapoints with the suffix &#34;Alert&#34; will only alert where a datastore has
         </attribute>
         <attribute>
             <name>scriptgroovy</name>
-            <value>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
+            <value>// Copyright (c) 2024 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
 
 import com.santaba.agent.util.script.ScriptCache
 import groovy.json.JsonSlurper
 import org.apache.http.client.utils.URIBuilder
+import org.apache.http.message.BasicNameValuePair
 import java.security.MessageDigest
 
 // core http classes
@@ -279,9 +354,12 @@ def propDeviceId = hostProps.get(&#39;system.deviceId&#39;)
 def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
 def propHost = hostProps.get(&#39;zertoappliance.host&#39;) ?: propSystemHost
 def propPort = hostProps.get(&#39;zertoappliance.port&#39;)?.isInteger() ?
-    hostProps.get(&#39;zertoappliance.port&#39;).toInteger() : 9669
+    hostProps.get(&#39;zertoappliance.port&#39;).toInteger() : 443
 def propUser = hostProps.get(&#39;zertoappliance.user&#39;)
 def propPass = hostProps.get(&#39;zertoappliance.pass&#39;)
+def propClientId = hostProps.get(&#39;zertoappliance.api.id&#39;)
+def propClientSecret = hostProps.get(&#39;zertoappliance.api.key&#39;)
+def propApplianceType = hostProps.get(&#39;zertoappliance.type&#39;)
 
 Map healthStatus = [
     &#39;Normal&#39;: 0,
@@ -299,12 +377,25 @@ Map availabilityStatus = [
 
 try
 {
-    def sessionKey = getCachedToken(propDeviceId) ?: getSessionKey(propHost, propPort, propUser, propPass)
+    def token = getCachedToken(propDeviceId)
+    def applianceType = getApplianceType(propPort, propApplianceType)
 
-    if (sessionKey == &#39;&#39;)
+    if (token == &#39;&#39;)
     {
-        println &#39;Error: Invalid session key).&#39;
-        return 2
+        if (applianceType == &#39;linux&#39;)
+        {
+            token = getLinuxToken(propHost, propPort, propClientId, propClientSecret)
+        }
+        else
+        {
+            token = getWindowsToken(propHost, propPort, propUser, propPass)
+        }
+
+        if (token == &#39;&#39;)
+        {
+            println &#39;Error: Invalid session token.&#39;
+            return 2
+        }
     }
 
     // datastores GET request
@@ -370,12 +461,57 @@ String getCachedToken(String deviceId)
     return cacheValue ?: &#39;&#39;
 }
 
-String getSessionKey(String host, Integer port, String user, String pass)
+String getApplianceType(Integer port, String applianceType)
+{
+    if (applianceType == &#39;linux&#39;) { return &#39;linux&#39; }
+    else if (applianceType == &#39;windows&#39;) { return &#39;windows&#39; }
+    else if (port == 443) { return &#39;linux&#39; }
+    else { return &#39;windows&#39; }
+}
+
+String getLinuxToken(String host, Integer port, String clientId, String clientSecret)
+{
+    def accessToken = &#39;&#39;
+
+    def postUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setPort(port)
+        .setHost(host)
+        .setPath(&#39;/auth/realms/zerto/protocol/openid-connect/token&#39;)
+
+    def postData = []
+    postData.add(new BasicNameValuePair(&#39;grant_type&#39;, &#39;client_credentials&#39;))
+    postData.add(new BasicNameValuePair(&#39;client_id&#39;, clientId))
+    postData.add(new BasicNameValuePair(&#39;client_secret&#39;, clientSecret))
+    def postEntity = new UrlEncodedFormEntity(postData)
+
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader(&#39;Accept&#39;, &#39;application/json&#39;)
+    httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/x-www-form-urlencoded&#39;)
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        def jsonSlurper = new JsonSlurper()
+        def jsonResponse = jsonSlurper.parseText(postResponse.body)
+        accessToken = jsonResponse.access_token
+    }
+
+    return accessToken
+}
+
+String getWindowsToken(String host, Integer port, String user, String pass)
 {
     def sessionKey = &#39;&#39;
     def base64Auth = &#34;${user}:${pass}&#34;.bytes.encodeBase64().toString()
 
-    def postUriBuilder = new URIBuilder().setScheme(&#39;https&#39;).setHost(host).setPort(port).setPath(&#39;/v1/session/add&#39;)
+    def postUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setHost(host)
+        .setPort(port)
+        .setPath(&#39;/v1/session/add&#39;)
+
     def httpPost = new HttpPost(postUriBuilder.build())
     httpPost.setHeader(&#39;Authorization&#39; , &#34;Basic ${base64Auth}&#34;)
     httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/json&#39;)
@@ -1190,7 +1326,7 @@ This started at ##START##, -- or ##DURATION## ago.</alertbody>
             <dataType>7</dataType>
             <type>2</type>
             <postprocessormethod>expression</postprocessormethod>
-            <postprocessorparam>if(or(gt(RecoveryUsedSizeBytes, 0), gt(JournalUsedSizeBytes, 0)), 100 * (CapacityBytes - FreeSpaceBytes) / CapacityBytes, 0)</postprocessorparam>
+            <postprocessorparam>if(un(CapacityBytes), unkn(), if(or(gt(RecoveryUsedSizeBytes, 0), gt(JournalUsedSizeBytes, 0)), 100 * (CapacityBytes - FreeSpaceBytes) / CapacityBytes, 0))</postprocessorparam>
             <usevalue></usevalue>
             <alertexpr>&#62; 96 98 99</alertexpr>
             <alertmissing>1</alertmissing>
@@ -1221,7 +1357,7 @@ This started at ##START##, -- or ##DURATION## ago.</alertbody>
             <dataType>7</dataType>
             <type>2</type>
             <postprocessormethod>expression</postprocessormethod>
-            <postprocessorparam>if(or(gt(RecoveryUsedSizeBytes, 0), gt(JournalUsedSizeBytes, 0)), AvailabilityStatus, 0)</postprocessorparam>
+            <postprocessorparam>if(un(AvailabilityStatus), unkn(), if(or(gt(RecoveryUsedSizeBytes, 0), gt(JournalUsedSizeBytes, 0)), AvailabilityStatus, 0))</postprocessorparam>
             <usevalue></usevalue>
             <alertexpr>= 3 3 3</alertexpr>
             <alertmissing>1</alertmissing>
@@ -1264,7 +1400,7 @@ Status codes:
             <dataType>7</dataType>
             <type>2</type>
             <postprocessormethod>expression</postprocessormethod>
-            <postprocessorparam>if(or(gt(RecoveryUsedSizeBytes, 0), gt(JournalUsedSizeBytes, 0)), HealthStatus, 0)</postprocessorparam>
+            <postprocessorparam>if(un(HealthStatus), unkn(), if(or(gt(RecoveryUsedSizeBytes, 0), gt(JournalUsedSizeBytes, 0)), HealthStatus, 0))</postprocessorparam>
             <usevalue></usevalue>
             <alertexpr>= 3 3</alertexpr>
             <alertmissing>1</alertmissing>

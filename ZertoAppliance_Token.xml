@@ -4,8 +4,9 @@
   <status>200</status>
   <errmsg>OK</errmsg>
   <interval>0</interval>
+  <isCollectorPublisherEnabled>false</isCollectorPublisherEnabled>
     <entry type="predatasource">
-        <version>1690922110</version>
+        <version>1720222223</version>
         <name>ZertoAppliance_Token</name>
         <displayedas>Zerto Appliance Token</displayedas>
         <description>Cache the Zerto Appliance API session token.</description>
@@ -31,16 +32,27 @@
         <technology>Device Properties:
 
 zertoappliance.host -- Optional, defaults to the device IP when not set.
-zertoappliance.port -- Optional, defaults to 9669.
-zertoappliance.user -- The user name (in the UPN or NetBIOS form as necessary).
-zertoappliance.pass -- The user password.
+zertoappliance.port -- Optional, defaults to 443 (Linux), set 9669 for Windows appliances.
+zertoappliance.user -- The user name (in the UPN or NetBIOS form as necessary), used with the Windows appliance.
+zertoappliance.pass -- The user password, used with the Windows appliance.
+zertoappliance.api.id -- The client ID, used with the Linux appliance.
+zertoappliance.api.key -- The client secret, used with the Linux appliance.
+zertoappliance.type -- Optional, forces the appliance type if required, set either &#34;windows&#34; or &#34;linux&#34;.
 system.categories -- Add &#34;ZertoAppliance&#34;.
 
 Notes:
 
-Requires access to the API endpoint on the ZVM or ZCM appliance. Details of the API are available at https://&#60;your-appliance-ip&#62;:9669/swagger/index.html
+Requires access to the API endpoint on the ZVM or ZCM appliance. There are different authentication methods for the Windows and Linux based appliances.
 
-This will populate the Collector script cache with a Zerto Appliance session token. Other DataSources will attempt to use this cached token if it is available.
+Windows
+
+The &#34;port&#34; property should be set to 9669, and &#34;user&#34;/&#34;pass&#34; are required to authenticate. Details of the API are available at https://&#60;appliance-ip&#62;:9669/swagger/index.html
+
+Linux
+
+The &#34;api.id&#34; and &#34;api.key&#34; properties are required to authenticate, these can be created in Keycloak, see: https://help.zerto.com/bundle/Linux.ZVM.HTML.10.0/page/Creating_Keycloak_Credentials.htm Details of the API are available at https://&#60;appliance-ip&#62;:443/management/api/swagger/index.html.
+
+This DataSource will populate the Collector script cache with a Zerto Appliance session token. Other DataSources will attempt to use this cached token if it is available.
 
 The cached token is scoped to a device ID, so multiple devices can run the Zerto Appliance DataSources if needed.</technology>
         <adlist><![CDATA[{"agdmethod":"none","agdparams":"","id":0,"filters":[],"params":{}}]]></adlist>
@@ -54,10 +66,12 @@ The cached token is scoped to a device ID, so multiple devices can run the Zerto
         </attribute>
         <attribute>
             <name>scriptgroovy</name>
-            <value>// Copyright (c) 2023 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
+            <value>// Copyright (c) 2024 Chris Redit. All rights reserved. https://github.com/chrisred/logicmonitor-zerto
 
 import com.santaba.agent.util.script.ScriptCache
+import groovy.json.JsonSlurper
 import org.apache.http.client.utils.URIBuilder
+import org.apache.http.message.BasicNameValuePair
 
 // core http classes
 import org.apache.http.auth.AuthScope
@@ -85,15 +99,27 @@ def propDeviceId = hostProps.get(&#39;system.deviceId&#39;)
 def propSystemHost = hostProps.get(&#39;system.hostname&#39;)
 def propHost = hostProps.get(&#39;zertoappliance.host&#39;) ?: propSystemHost
 def propPort = hostProps.get(&#39;zertoappliance.port&#39;)?.isInteger() ?
-    hostProps.get(&#39;zertoappliance.port&#39;).toInteger() : 9669
+    hostProps.get(&#39;zertoappliance.port&#39;).toInteger() : 443
 def propUser = hostProps.get(&#39;zertoappliance.user&#39;)
 def propPass = hostProps.get(&#39;zertoappliance.pass&#39;)
+def propClientId = hostProps.get(&#39;zertoappliance.api.id&#39;)
+def propClientSecret = hostProps.get(&#39;zertoappliance.api.key&#39;)
+def propApplianceType = hostProps.get(&#39;zertoappliance.type&#39;)
 
 try
 {
-    def sessionKey = getSessionKey(propHost, propPort, propUser, propPass)
+    def token = &#39;&#39;
 
-    if (sessionKey == &#39;&#39;)
+    if (getApplianceType(propPort, propApplianceType) == &#39;linux&#39;)
+    {
+        token = getLinuxToken(propHost, propPort, propClientId, propClientSecret)
+    }
+    else
+    {
+        token = getWindowsToken(propHost, propPort, propUser, propPass)
+    }
+
+    if (token == &#39;&#39;)
     {
         println &#39;Error: Invalid session token.&#39;
         return 2
@@ -101,7 +127,7 @@ try
     else
     {
         def cache = ScriptCache.getCache()
-        cache.set(&#34;ZertoApplianceToken${propDeviceId}&#34;, sessionKey, 1800000)
+        cache.set(&#34;ZertoApplianceToken${propDeviceId}&#34;, token, 1800000)
     }
 
     return 0
@@ -112,12 +138,57 @@ catch (Exception e)
     return 1
 }
 
-String getSessionKey(String host, Integer port, String user, String pass)
+String getApplianceType(Integer port, String applianceType)
+{
+    if (applianceType == &#39;linux&#39;) { return &#39;linux&#39; }
+    else if (applianceType == &#39;windows&#39;) { return &#39;windows&#39; }
+    else if (port == 443) { return &#39;linux&#39; }
+    else { return &#39;windows&#39; }
+}
+
+String getLinuxToken(String host, Integer port, String clientId, String clientSecret)
+{
+    def accessToken = &#39;&#39;
+
+    def postUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setPort(port)
+        .setHost(host)
+        .setPath(&#39;/auth/realms/zerto/protocol/openid-connect/token&#39;)
+
+    def postData = []
+    postData.add(new BasicNameValuePair(&#39;grant_type&#39;, &#39;client_credentials&#39;))
+    postData.add(new BasicNameValuePair(&#39;client_id&#39;, clientId))
+    postData.add(new BasicNameValuePair(&#39;client_secret&#39;, clientSecret))
+    def postEntity = new UrlEncodedFormEntity(postData)
+
+    def httpPost = new HttpPost(postUriBuilder.build())
+    httpPost.setHeader(&#39;Accept&#39;, &#39;application/json&#39;)
+    httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/x-www-form-urlencoded&#39;)
+
+    def postResponse = runRequest(httpPost, null, postEntity)
+
+    if (postResponse.code == 200)
+    {
+        def jsonSlurper = new JsonSlurper()
+        def jsonResponse = jsonSlurper.parseText(postResponse.body)
+        accessToken = jsonResponse.access_token
+    }
+
+    return accessToken
+}
+
+String getWindowsToken(String host, Integer port, String user, String pass)
 {
     def sessionKey = &#39;&#39;
     def base64Auth = &#34;${user}:${pass}&#34;.bytes.encodeBase64().toString()
 
-    def postUriBuilder = new URIBuilder().setScheme(&#39;https&#39;).setHost(host).setPort(port).setPath(&#39;/v1/session/add&#39;)
+    def postUriBuilder = new URIBuilder()
+        .setScheme(&#39;https&#39;)
+        .setHost(host)
+        .setPort(port)
+        .setPath(&#39;/v1/session/add&#39;)
+
     def httpPost = new HttpPost(postUriBuilder.build())
     httpPost.setHeader(&#39;Authorization&#39; , &#34;Basic ${base64Auth}&#34;)
     httpPost.setHeader(&#39;Content-Type&#39;, &#39;application/json&#39;)
