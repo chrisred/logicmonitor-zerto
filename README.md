@@ -19,4 +19,7 @@ Modules with the `ZertoAnalytics` prefix work with [Zerto Analytics Portal](http
 requires an Analytics user account to authenticate to the API.
 
 Modules with the `ZertoAppliance` prefix work with the "Zerto Virtual Manager" and "Zerto Cloud Manager" API. This
-requires an account on the ZVM/ZCM with read access to authenticate. The modules have been tested with Zerto v9.
+requires an account on the ZVM/ZCM with read access to authenticate. The Windows based "ZVM" and Linux based "ZVMA"
+have difference authentication methods, the notes in the `ZertoAppliance_Token` module have more details.
+
+The modules have been tested with Zerto v9+.
