@@ -82,7 +82,15 @@ try
         .setPath('/v1/datastores')
 
     def httpGet = new HttpGet(mainUriBuilder.build())
-    httpGet.setHeader('x-zerto-session', sessionKey)
+
+    if (applianceType == 'linux')
+    {
+        httpGet.setHeader('Authorization', "Bearer ${token}")
+    }
+    else
+    {
+        httpGet.setHeader('x-zerto-session', token)
+    }
 
     def mainResponse = runRequest(httpGet)
 

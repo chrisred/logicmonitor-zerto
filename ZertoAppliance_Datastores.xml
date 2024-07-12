@@ -6,7 +6,7 @@
   <interval>0</interval>
   <isCollectorPublisherEnabled>false</isCollectorPublisherEnabled>
     <entry type="predatasource">
-        <version>1720359932</version>
+        <version>1720771012</version>
         <name>ZertoAppliance_Datastores</name>
         <displayedas>Zerto Appliance Datastores</displayedas>
         <description>Datastore usage and availability.</description>
@@ -406,7 +406,15 @@ try
         .setPath(&#39;/v1/datastores&#39;)
 
     def httpGet = new HttpGet(mainUriBuilder.build())
-    httpGet.setHeader(&#39;x-zerto-session&#39;, sessionKey)
+
+    if (applianceType == &#39;linux&#39;)
+    {
+        httpGet.setHeader(&#39;Authorization&#39;, &#34;Bearer ${token}&#34;)
+    }
+    else
+    {
+        httpGet.setHeader(&#39;x-zerto-session&#39;, token)
+    }
 
     def mainResponse = runRequest(httpGet)
 
