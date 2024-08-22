@@ -1,6 +1,7 @@
 import com.santaba.agent.util.script.ScriptCache
 import groovy.json.JsonSlurper
 import org.apache.http.client.utils.URIBuilder
+import org.apache.http.message.BasicNameValuePair
 
 // core http classes
 import org.apache.http.auth.AuthScope
