@@ -6,7 +6,7 @@
   <interval>0</interval>
   <isCollectorPublisherEnabled>false</isCollectorPublisherEnabled>
     <entry type="predatasource">
-        <version>1720222032</version>
+        <version>1739360618</version>
         <name>ZertoAppliance_VRAs</name>
         <displayedas>Zerto Appliance VRAs</displayedas>
         <description>VRA status and metrics.</description>
@@ -17,6 +17,7 @@
         <appliesTo>hasCategory(&#34;ZertoAppliance&#34;)</appliesTo>
         <wildcardauto>true</wildcardauto>
         <wildcardpersist>false</wildcardpersist>
+        <showDeletedInstanceDays>0</showDeletedInstanceDays>
         <wildcardlinuxscript>ad_script</wildcardlinuxscript>
         <wildcardlinuxcmdline>type=&#34;embeded&#34; </wildcardlinuxcmdline>
         <wildcardwinscript>ad_script</wildcardwinscript>
@@ -380,7 +381,7 @@ try
     def mainUriBuilder = new URIBuilder()
         .setScheme(&#39;https&#39;)
         .setHost(propHost)
-        .setPort(9669)
+        .setPort(propPort)
         .setPath(&#39;/v1/vras&#39;)
 
     def httpGet = new HttpGet(mainUriBuilder.build())

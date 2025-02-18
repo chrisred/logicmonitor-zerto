@@ -63,7 +63,7 @@ try
     def mainUriBuilder = new URIBuilder()
         .setScheme('https')
         .setHost(propHost)
-        .setPort(9669)
+        .setPort(propPort)
         .setPath('/v1/vras')
 
     def httpGet = new HttpGet(mainUriBuilder.build())
