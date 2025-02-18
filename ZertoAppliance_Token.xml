@@ -6,17 +6,18 @@
   <interval>0</interval>
   <isCollectorPublisherEnabled>false</isCollectorPublisherEnabled>
     <entry type="predatasource">
-        <version>1720222223</version>
+        <version>1739359756</version>
         <name>ZertoAppliance_Token</name>
         <displayedas>Zerto Appliance Token</displayedas>
         <description>Cache the Zerto Appliance API session token.</description>
         <collector>script</collector>
         <hasMultiInstances>false</hasMultiInstances>
         <useWildValueAsUniqueIdentifier>false</useWildValueAsUniqueIdentifier>
-        <schedule>720</schedule>
+        <schedule>300</schedule>
         <appliesTo>hasCategory(&#34;ZertoAppliance&#34;)</appliesTo>
         <wildcardauto>false</wildcardauto>
         <wildcardpersist>false</wildcardpersist>
+        <showDeletedInstanceDays>0</showDeletedInstanceDays>
         <wildcardlinuxscript></wildcardlinuxscript>
         <wildcardlinuxcmdline></wildcardlinuxcmdline>
         <wildcardwinscript></wildcardwinscript>
@@ -54,7 +55,9 @@ The &#34;api.id&#34; and &#34;api.key&#34; properties are required to authentica
 
 This DataSource will populate the Collector script cache with a Zerto Appliance session token. Other DataSources will attempt to use this cached token if it is available.
 
-The cached token is scoped to a device ID, so multiple devices can run the Zerto Appliance DataSources if needed.</technology>
+The cached token is scoped to a device ID, so multiple devices can run the Zerto Appliance DataSources if needed.
+
+The default access token lifetime for Keycloak is 5 minutes. This can be increased under the Advanced tab using the Access Token Lifespan option for the client that was added when creating the credentials. The Collection Schedule for this DataSource could then be increased accordingly.</technology>
         <adlist><![CDATA[{"agdmethod":"none","agdparams":"","id":0,"filters":[],"params":{}}]]></adlist>
         <schemaVersion>2</schemaVersion>
         <dataSourceType>1</dataSourceType>
@@ -288,16 +291,6 @@ Map runRequest(HttpRequestBase request, Credentials credentials=null, AbstractHt
         </attribute>
         <attribute>
             <name>linuxcmdline</name>
-            <value></value>
-            <comment></comment>
-        </attribute>
-        <attribute>
-            <name>properties</name>
-            <value></value>
-            <comment></comment>
-        </attribute>
-        <attribute>
-            <name>manualConnections</name>
             <value></value>
             <comment></comment>
         </attribute>
